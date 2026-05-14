@@ -76,6 +76,31 @@ def test_basic_cumem():
 
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_release_tags_only_releases_selected_tag():
+    allocator = CuMemAllocator.get_instance()
+
+    with allocator.use_memory_pool(tag="weights"):
+        weight = torch.ones(1024, device=DEVICE_TYPE)
+    with allocator.use_memory_pool(tag="scheduling"):
+        scheduling = torch.ones(1024, device=DEVICE_TYPE) * 3
+    with allocator.use_memory_pool(tag="kv_cache"):
+        kv_cache = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=DEVICE_TYPE)
+        kv_cache.fill_(7)
+
+    free_bytes = torch.cuda.mem_get_info()[0]
+    allocator.release_tags(("kv_cache",))
+    free_bytes_after_release = torch.cuda.mem_get_info()[0]
+    assert free_bytes_after_release > free_bytes
+
+    assert torch.allclose(weight, torch.ones_like(weight))
+    assert torch.allclose(scheduling, torch.ones_like(scheduling) * 3)
+
+    allocator.wake_up(["kv_cache"])
+    kv_cache.zero_()
+    assert torch.count_nonzero(kv_cache) == 0
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
@@ -175,6 +200,31 @@ def test_end_to_end(model: str):
 
     # cmp output
     assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_release_resume_kv_cache():
+    model = "facebook/opt-125m"
+    llm = LLM(model, enable_sleep_mode=True, gpu_memory_utilization=0.3)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    free_gpu_bytes_before_release = torch.cuda.mem_get_info()[0]
+    llm.release_kv_cache()
+
+    free_gpu_bytes_after_release, _ = torch.cuda.mem_get_info()
+    released_bytes = free_gpu_bytes_after_release - free_gpu_bytes_before_release
+    assert released_bytes > 0
+
+    llm.resume_kv_cache()
+    free_gpu_bytes_after_resume = torch.cuda.mem_get_info()[0]
+    resumed_bytes = free_gpu_bytes_after_release - free_gpu_bytes_after_resume
+    assert resumed_bytes > 0
+
+    output2 = llm.generate(prompt, sampling_params)
+
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
 @create_new_process_for_each_test()

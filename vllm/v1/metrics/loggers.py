@@ -70,6 +70,9 @@ class StatLoggerBase(ABC):
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
         pass
 
+    def record_kv_cache_released(self):  # noqa
+        pass
+
 
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
     factories: list[StatLoggerFactory] = []
@@ -496,14 +499,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "Engine sleep state; awake = 0 means engine is sleeping; "
                 "awake = 1 means engine is awake; "
                 "weights_offloaded = 1 means sleep level 1; "
-                "discard_all = 1 means sleep level 2."
+                "discard_all = 1 means sleep level 2; "
+                "kv_cache_released = 1 means only KV cache memory is released."
             ),
             labelnames=labelnames + ["sleep_state"],
             multiprocess_mode="mostrecent",
         )
 
         self.gauge_engine_sleep_state = {}
-        sleep_state = ["awake", "weights_offloaded", "discard_all"]
+        sleep_state = [
+            "awake",
+            "weights_offloaded",
+            "discard_all",
+            "kv_cache_released",
+        ]
 
         for s in sleep_state:
             self.gauge_engine_sleep_state[s] = {
@@ -1229,10 +1238,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         for engine_idx in self.engine_indexes:
             self.gauge_engine_sleep_state["discard_all"][engine_idx].set(discard_all)
+            self.gauge_engine_sleep_state["kv_cache_released"][engine_idx].set(0)
             self.gauge_engine_sleep_state["weights_offloaded"][engine_idx].set(
                 weights_offloaded
             )
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
+
+    def record_kv_cache_released(self):
+        for engine_idx in self.engine_indexes:
+            self.gauge_engine_sleep_state["awake"][engine_idx].set(0)
+            self.gauge_engine_sleep_state["weights_offloaded"][engine_idx].set(0)
+            self.gauge_engine_sleep_state["discard_all"][engine_idx].set(0)
+            self.gauge_engine_sleep_state["kv_cache_released"][engine_idx].set(1)
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
@@ -1349,6 +1366,10 @@ class StatLoggerManager:
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
+
+    def record_kv_cache_released(self):
+        for logger in self.stat_loggers:
+            logger.record_kv_cache_released()
 
     def log(self):
         for logger in self.stat_loggers:
