@@ -375,7 +375,7 @@ class Executor(ABC):
 
     def resume_kv_cache(self):
         if not self.is_sleeping:
-            logger.warning("Executor is not sleeping.")
+            logger.warning("KV cache is not released; call release_kv_cache() first.")
             return
         if self.sleeping_tags != {"kv_cache"}:
             raise ValueError(
