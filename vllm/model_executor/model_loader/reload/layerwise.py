@@ -107,8 +107,9 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         if info.can_load():
             continue
 
-        # Save current tensors for later copying
+        # Save current tensors and buffer metadata for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
+        info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -249,9 +250,9 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
                 continue
 
             # reloading: place kernel tensors back as a fallback
-            elif info.load_numel_total > 0:  # type: ignore[operator]
+            if info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
-                _place_kernel_tensors(layer, info)
+            _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -384,7 +385,7 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
         if name not in layer._buffers:
             continue
         if (
-            name in layer._non_persistent_buffers_set
+            name in info.kernel_non_persistent_buffers
             and name not in loaded_tensor_names
         ):
             continue
@@ -394,7 +395,6 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
-    non_persistent_buffers = set(layer._non_persistent_buffers_set)
     for name in get_layer_tensors(layer):
         delattr(layer, name)
 
@@ -406,5 +406,5 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
         layer.register_buffer(
             name,
             buffer,
-            persistent=name not in non_persistent_buffers,
+            persistent=name not in info.kernel_non_persistent_buffers,
         )
