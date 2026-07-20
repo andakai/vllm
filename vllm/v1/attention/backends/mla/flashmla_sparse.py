@@ -59,6 +59,9 @@ logger = init_logger(__name__)
 # so when the per-rank head count is below MIN_HEADS_FOR_BF16_PREFILL we use the mixed
 # batch mode (#1).
 MIN_HEADS_FOR_BF16_PREFILL = 32
+# Prefer exact h8/h16 kernels over h64 padding on Hopper. Exact h32 is
+# supported, but retains the faster padded-h64 path.
+PREFERRED_SM90_FP8_DECODE_HEADS = (8, 16)
 
 """
 NOTE: FlashMLA Sparse uses an fp8 cache with the following format
@@ -262,9 +265,8 @@ class FlashMLASparseMetadataBuilder(
         sm_count = num_compute_units(device.index)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
-        # FP8 decode kernel only supports h_q = 64 or 128, so we need to pad
-        self.fp8_decode_padded_heads = (
-            FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
+        self.fp8_decode_kernel_heads = (
+            FlashMLASparseImpl._compute_fp8_decode_kernel_heads(self.num_heads)
         )
 
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
@@ -291,8 +293,7 @@ class FlashMLASparseMetadataBuilder(
         # - SM100 (Blackwell head64/head64x2): num_sm_parts = num_sms / s_q
         # - SM100 (Blackwell head128): num_sm_parts = num_sms / s_q / 2
         # For max buffer size, use s_q = 1 (the case that produces largest output)
-        # Use padded head count since that's what will be passed to the kernel
-        h_q = self.fp8_decode_padded_heads
+        h_q = self.fp8_decode_kernel_heads
         if current_platform.is_device_capability_family(100):
             # SM100 head64 or head64x2 uses full SM count
             max_num_sm_parts = sm_count
@@ -325,15 +326,14 @@ class FlashMLASparseMetadataBuilder(
         """
         num_tokens = common_attn_metadata.num_actual_tokens
 
-        # Use padded head count since that's what the kernel will see
-        padded_heads = self.fp8_decode_padded_heads
+        kernel_heads = self.fp8_decode_kernel_heads
 
         # Build metadata for all tokens as a single batch
         scheduler_metadata, _ = get_mla_metadata(
             cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
-            num_q_tokens_per_head_k=num_tokens * padded_heads,
+            num_q_tokens_per_head_k=num_tokens * kernel_heads,
             topk=self.topk_tokens,
-            num_heads_q=padded_heads,
+            num_heads_q=kernel_heads,
             num_heads_k=1,
             is_fp8_kvcache=True,
         )
@@ -472,7 +472,6 @@ class FlashMLASparseMetadataBuilder(
             )
 
         if num_decodes > 0:
-            # Use padded head count since that's what the kernel will see
             scheduler_metadata, _ = get_mla_metadata()
 
             kernel_meta = FlashMLASparseMetadata.FP8KernelMetadata(
@@ -513,9 +512,14 @@ class FlashMLASparseMetadataBuilder(
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     @staticmethod
-    def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
-        # FP8 decode kernel only supports h_q = 64 or 128
-        # Compute padded head count for decode
+    def _compute_fp8_decode_kernel_heads(num_heads: int) -> int:
+        if not 0 < num_heads <= 128:
+            raise ValueError(f"Unsupported FP8 sparse decode head count: {num_heads}")
+        if (
+            current_platform.is_device_capability_family(90)
+            and num_heads in PREFERRED_SM90_FP8_DECODE_HEADS
+        ):
+            return num_heads
         return 64 if num_heads <= 64 else 128
 
     def __init__(
@@ -555,7 +559,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64
         )
-        self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
+        self.fp8_decode_kernel_heads = self._compute_fp8_decode_kernel_heads(num_heads)
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -769,15 +773,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
-        padded_num_heads = self.fp8_decode_padded_heads
+        kernel_num_heads = self.fp8_decode_kernel_heads
 
-        # Pad query if needed (kernel only supports h_q = 64 or 128)
-        if actual_num_heads < padded_num_heads:
+        if actual_num_heads < kernel_num_heads:
             logger.warning_once(
                 f"Padding num_heads from {actual_num_heads} to "
-                f"{padded_num_heads} for FP8 sparse decode kernel"
+                f"{kernel_num_heads} for FP8 sparse decode kernel"
             )
-            q_padded = q.new_zeros((q.size(0), q.size(1), padded_num_heads, q.size(3)))
+            q_padded = q.new_zeros((q.size(0), q.size(1), kernel_num_heads, q.size(3)))
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
@@ -793,9 +796,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             softmax_scale=self.softmax_scale,
         )
 
-        # Slice output back to actual head count if we padded
-        if actual_num_heads < padded_num_heads:
+        if actual_num_heads < kernel_num_heads:
             out = out[:, :, :actual_num_heads, :]
+            lse = lse[:, :actual_num_heads, :]
 
         return out, lse
 

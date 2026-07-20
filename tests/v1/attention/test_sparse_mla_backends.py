@@ -1302,6 +1302,17 @@ def test_flashmla_fp8_metadata_reuses_common_batch_split():
     assert fp8_metadata.num_prefill_tokens == 1
 
 
+@pytest.mark.parametrize("num_heads", [8, 16, 32])
+def test_flashmla_fp8_kernel_head_envelope(num_heads: int):
+    use_native = current_platform.is_device_capability_family(90) and num_heads in (
+        8,
+        16,
+    )
+    expected = num_heads if use_native or num_heads >= 64 else 64
+
+    assert FlashMLASparseImpl._compute_fp8_decode_kernel_heads(num_heads) == expected
+
+
 def test_flashmla_common_metadata_requires_uniform_decodes():
     common_metadata = SimpleNamespace(
         max_query_len=3,

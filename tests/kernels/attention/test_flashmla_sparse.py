@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 
 def test_sparse_flashmla_metadata_smoke():
     import vllm.v1.attention.ops.flashmla as fm
@@ -35,7 +37,8 @@ def test_sparse_flashmla_metadata_smoke():
     assert num_splits is None
 
 
-def test_sparse_flashmla_decode_smoke():
+@pytest.mark.parametrize("num_heads_q", [8, 16, 32, 64])
+def test_sparse_flashmla_decode_smoke(num_heads_q: int):
     import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
@@ -45,7 +48,8 @@ def test_sparse_flashmla_decode_smoke():
     device = torch.device("cuda")
     batch_size = 1
     seqlen_q = 1
-    num_heads_q = 64
+    if num_heads_q < 64 and not current_platform.is_device_capability_family(90):
+        pytest.skip("Native low-head sparse decode requires SM90")
     head_dim_k = 576
     head_dim_v = 512
     num_heads_k = 1
@@ -93,9 +97,8 @@ def test_sparse_flashmla_decode_smoke():
         indices=indices,
         is_fp8_kvcache=True,
     )
-    assert out.shape[0] == batch_size
-    assert out.shape[-1] == head_dim_v
-    assert lse.shape[0] == batch_size
+    assert out.shape == (batch_size, seqlen_q, num_heads_q, head_dim_v)
+    assert lse.shape == (batch_size, num_heads_q, seqlen_q)
 
 
 def test_sparse_flashmla_prefill_smoke():
