@@ -60,19 +60,19 @@ class TestResolveBuilder:
         builder = resolve_builder(cfg)
         assert isinstance(builder, CustomBuilder)
 
-    @patch("vllm.platforms.current_platform")
-    def test_glm5_model_declared_builder(self, mock_platform):
+    def test_glm5_model_declared_builder(self):
         _skip_glm5_on_xpu()
         from vllm.models.glm5next.kv_cache_config import (
             Glm5NextKVCacheConfigBuilder,
         )
 
-        mock_platform.get_kv_cache_config_builder_cls.return_value = None
         cfg = _make_vllm_config(
             "vllm.models.glm5next.kv_cache_config."
             "Glm5NextKVCacheConfigBuilder"
         )
-        assert isinstance(resolve_builder(cfg), Glm5NextKVCacheConfigBuilder)
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.get_kv_cache_config_builder_cls.return_value = None
+            assert isinstance(resolve_builder(cfg), Glm5NextKVCacheConfigBuilder)
 
     @patch("vllm.platforms.current_platform")
     def test_platform_overrides_model(self, mock_platform):
