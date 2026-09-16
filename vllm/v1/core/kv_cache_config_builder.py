@@ -46,7 +46,9 @@ class KVCacheConfigBuilder:
         """
         from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
 
-        return get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory)
+        return get_kv_cache_configs(
+            vllm_config, kv_cache_specs, available_memory, builder=self
+        )
 
     def get_kv_cache_groups(
         self,
@@ -118,6 +120,18 @@ class KVCacheConfigBuilder:
         )
 
         return _impl(kv_cache_groups)
+
+    def _max_memory_usage_bytes_from_groups(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_groups: list["KVCacheGroupSpec"],
+    ) -> int:
+        """Return the maximum per-request memory for the groups."""
+        from vllm.v1.core.kv_cache_planning import (
+            _max_memory_usage_bytes_from_groups as _impl,
+        )
+
+        return _impl(vllm_config, kv_cache_groups)
 
 
 def _load_builder(cls_path: str) -> KVCacheConfigBuilder:

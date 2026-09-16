@@ -55,6 +55,19 @@ class TestResolveBuilder:
         assert isinstance(builder, CustomBuilder)
 
     @patch("vllm.platforms.current_platform")
+    def test_glm5_model_declared_builder(self, mock_platform):
+        from vllm.models.glm5next.kv_cache_config import (
+            Glm5NextKVCacheConfigBuilder,
+        )
+
+        mock_platform.get_kv_cache_config_builder_cls.return_value = None
+        cfg = _make_vllm_config(
+            "vllm.models.glm5next.kv_cache_config."
+            "Glm5NextKVCacheConfigBuilder"
+        )
+        assert isinstance(resolve_builder(cfg), Glm5NextKVCacheConfigBuilder)
+
+    @patch("vllm.platforms.current_platform")
     def test_platform_overrides_model(self, mock_platform):
         platform_path = "tests.v1.core.test_kv_cache_config_builder.CustomBuilder"
         mock_platform.get_kv_cache_config_builder_cls.return_value = platform_path
@@ -122,3 +135,58 @@ class TestBuilderSingleton:
             # Second call reuses the cached builder without re-loading.
             assert builder_mod.build_kv_cache_configs(cfg, [], [0]) == []
             assert load.call_count == 1
+
+
+def test_glm5_models_declare_kv_cache_builder():
+    from vllm.model_executor.models.registry import _ModelInfo
+    from vllm.models.glm5next import (
+        Glm5NextForCausalLM,
+        Glm5NextForConditionalGeneration,
+    )
+
+    expected = (
+        "vllm.models.glm5next.kv_cache_config.Glm5NextKVCacheConfigBuilder"
+    )
+    for model_cls in (Glm5NextForCausalLM, Glm5NextForConditionalGeneration):
+        assert model_cls.kv_cache_config_builder_cls == expected
+        model_info = _ModelInfo.from_model_cls(model_cls)
+        assert model_info.kv_cache_config_builder_cls == expected
+
+
+def test_glm5_builder_preserves_generic_grouping_precedence():
+    from vllm.models.glm5next.kv_cache_config import (
+        Glm5NextKVCacheConfigBuilder,
+    )
+
+    cfg = _make_vllm_config()
+    cfg.scheduler_config.disable_hybrid_kv_cache_manager = True
+    cfg.attention_config.hisparse_config = None
+    builder = Glm5NextKVCacheConfigBuilder()
+
+    with patch.object(
+        KVCacheConfigBuilder, "get_kv_cache_groups", return_value=[]
+    ) as default_grouping:
+        assert builder.get_kv_cache_groups(cfg, {}) == []
+
+    default_grouping.assert_called_once_with(cfg, {})
+
+
+def test_glm5_builder_preserves_host_memory_placement():
+    from vllm.models.glm5next.kv_cache_config import (
+        Glm5NextKVCacheConfigBuilder,
+    )
+
+    cfg = _make_vllm_config()
+    cfg.attention_config.hisparse_config = None
+    cfg.cache_config.kv_cache_host_memory_bytes = 1
+    builder = Glm5NextKVCacheConfigBuilder()
+    expected = MagicMock()
+
+    with patch.object(
+        KVCacheConfigBuilder,
+        "get_kv_cache_config_from_groups",
+        return_value=expected,
+    ) as default_placement:
+        assert builder.get_kv_cache_config_from_groups(cfg, [], 0) is expected
+
+    default_placement.assert_called_once_with(cfg, [], 0)
