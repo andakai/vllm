@@ -6,11 +6,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.platforms import current_platform
 from vllm.v1.core.kv_cache_config_builder import (
     KVCacheConfigBuilder,
     _load_builder,
     resolve_builder,
 )
+
+
+def _skip_glm5_on_xpu():
+    if current_platform.is_xpu():
+        pytest.skip("GLM-5.3-Flash does not support XPU")
 
 
 def _make_vllm_config(builder_cls_path: str | None = None) -> MagicMock:
@@ -56,6 +62,7 @@ class TestResolveBuilder:
 
     @patch("vllm.platforms.current_platform")
     def test_glm5_model_declared_builder(self, mock_platform):
+        _skip_glm5_on_xpu()
         from vllm.models.glm5next.kv_cache_config import (
             Glm5NextKVCacheConfigBuilder,
         )
@@ -138,6 +145,7 @@ class TestBuilderSingleton:
 
 
 def test_glm5_models_declare_kv_cache_builder():
+    _skip_glm5_on_xpu()
     from vllm.model_executor.models.registry import _ModelInfo
     from vllm.models.glm5next import (
         Glm5NextForCausalLM,
@@ -154,6 +162,7 @@ def test_glm5_models_declare_kv_cache_builder():
 
 
 def test_glm5_builder_preserves_generic_grouping_precedence():
+    _skip_glm5_on_xpu()
     from vllm.models.glm5next.kv_cache_config import (
         Glm5NextKVCacheConfigBuilder,
     )
