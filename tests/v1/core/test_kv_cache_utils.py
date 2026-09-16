@@ -2788,7 +2788,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible_no_indexer():
     assert kv_cache_spec["layers.0.linear_attn"].page_size_bytes > mla_page
 
     with pytest.raises(NotImplementedError, match="page size"):
-        kv_cache_planning.get_kv_cache_groups(vllm_config, kv_cache_spec)
+        _glm5_builder().get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
@@ -2971,7 +2971,8 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
             kv_cache_spec[f"layers.{i}.linear_attn"] = new_mamba_spec()
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
 
-    groups = kv_cache_planning.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    builder = _glm5_builder()
+    groups = builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
     mamba_groups = [
         group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)
     ]
@@ -2980,10 +2981,10 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
     for group in mamba_groups:
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = kv_cache_planning._pool_bytes_per_block(groups)
+    bytes_per_block = builder._pool_bytes_per_block(groups)
     assert bytes_per_block == 7 * mla_page
 
-    kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+    kv_cache_config = builder.get_kv_cache_config_from_groups(
         vllm_config, groups, bytes_per_block * 100 + 1
     )
     assert kv_cache_config.num_blocks == 100
@@ -3049,10 +3050,10 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     )
 
     unwrapped_groups = scheduler_config.kv_cache_groups
-    expected_max_mem = kv_cache_planning._max_memory_usage_bytes_from_groups(
+    expected_max_mem = builder._max_memory_usage_bytes_from_groups(
         vllm_config, unwrapped_groups
     )
-    expected_pool = kv_cache_planning._pool_bytes_per_block(unwrapped_groups)
+    expected_pool = builder._pool_bytes_per_block(unwrapped_groups)
     expected_blocks_per_request = (
         expected_max_mem + expected_pool - 1
     ) // expected_pool
