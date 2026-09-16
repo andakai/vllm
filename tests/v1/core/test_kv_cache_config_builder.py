@@ -6,9 +6,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.platforms import Platform
+from vllm.platforms import Platform, current_platform
 from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+
+
+def _skip_glm5_on_xpu():
+    if current_platform.is_xpu():
+        pytest.skip("GLM-5.3-Flash does not support XPU")
 
 
 def _make_vllm_config(builder_cls_path: str | None = None) -> MagicMock:
@@ -59,6 +64,24 @@ class TestBuilderResolution:
         mock_platform.get_kv_cache_config_builder_cls.return_value = CUSTOM_PATH
         cfg = _make_vllm_config()
         assert isinstance(KVCacheConfigBuilder._resolve(cfg), CustomBuilder)
+
+    def test_glm5_model_declared_builder(self):
+        _skip_glm5_on_xpu()
+        from vllm.models.glm5next.kv_cache_config import (
+            Glm5NextKVCacheConfigBuilder,
+        )
+
+        cfg = _make_vllm_config(
+            "vllm.models.glm5next.kv_cache_config."
+            "Glm5NextKVCacheConfigBuilder"
+        )
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.get_kv_cache_config_builder_cls.return_value = (
+                cfg.model_config.kv_cache_config_builder_cls
+            )
+            assert isinstance(
+                KVCacheConfigBuilder._resolve(cfg), Glm5NextKVCacheConfigBuilder
+            )
 
     @patch("vllm.platforms.current_platform")
     def test_resolves_once_and_caches(self, mock_platform):
@@ -156,3 +179,39 @@ class TestDefaultBuilderDelegation:
         result = KVCacheConfigBuilder.get_kv_cache_configs(cfg, specs, memory)
         assert result is mock_impl.return_value
         mock_impl.assert_called_once_with(cfg, specs, memory)
+
+
+def test_glm5_models_declare_kv_cache_builder():
+    _skip_glm5_on_xpu()
+    from vllm.model_executor.models.registry import _ModelInfo
+    from vllm.models.glm5next import (
+        Glm5NextForCausalLM,
+        Glm5NextForConditionalGeneration,
+    )
+
+    expected = (
+        "vllm.models.glm5next.kv_cache_config.Glm5NextKVCacheConfigBuilder"
+    )
+    for model_cls in (Glm5NextForCausalLM, Glm5NextForConditionalGeneration):
+        assert model_cls.kv_cache_config_builder_cls == expected
+        model_info = _ModelInfo.from_model_cls(model_cls)
+        assert model_info.kv_cache_config_builder_cls == expected
+
+
+def test_glm5_builder_preserves_generic_grouping_precedence():
+    _skip_glm5_on_xpu()
+    from vllm.models.glm5next.kv_cache_config import (
+        Glm5NextKVCacheConfigBuilder,
+    )
+
+    cfg = _make_vllm_config()
+    cfg.scheduler_config.disable_hybrid_kv_cache_manager = True
+    cfg.attention_config.hisparse_config = None
+    builder = Glm5NextKVCacheConfigBuilder()
+
+    with patch.object(
+        DefaultKVCacheConfigBuilder, "get_kv_cache_groups", return_value=[]
+    ) as default_grouping:
+        assert builder.get_kv_cache_groups(cfg, {}) == []
+
+    default_grouping.assert_called_once_with(cfg, {})
