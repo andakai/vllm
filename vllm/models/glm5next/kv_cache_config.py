@@ -6,10 +6,9 @@ from typing import cast
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
 from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
     create_kv_cache_group_specs,
-    may_override_num_blocks,
 )
 from vllm.v1.kv_cache_interface import (
     KpoolTailSpec,
@@ -222,7 +221,7 @@ def _glm5_next_tensor_layout(
     )
 
 
-class Glm5NextKVCacheConfigBuilder(KVCacheConfigBuilder):
+class Glm5NextKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     """Plan GLM-5.3-Flash's shared Mamba, MLA, and indexer storage."""
 
     def get_kv_cache_groups(
@@ -269,7 +268,7 @@ class Glm5NextKVCacheConfigBuilder(KVCacheConfigBuilder):
             _,
         ) = layout
         bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
-        num_blocks = may_override_num_blocks(
+        num_blocks = self.may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block
         )
         size = bytes_per_block * num_blocks

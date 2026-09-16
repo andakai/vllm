@@ -39,10 +39,8 @@ from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
-    check_enough_kv_cache_memory,
+    DefaultKVCacheConfigBuilder,
     estimate_max_model_len,
-    get_kv_cache_configs,
-    get_kv_cache_groups,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -91,6 +89,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
+
+default_builder = DefaultKVCacheConfigBuilder()
 
 pytestmark = pytest.mark.cpu_test
 
@@ -152,7 +152,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
-    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+    cache_config = default_builder.get_kv_cache_config_from_groups(
         config, [group], available_memory=2**30
     )
     assert cache_config.num_blocks == 7
@@ -1200,7 +1200,7 @@ def test_get_kv_cache_configs_multiple_workers():
     ]
 
     # Basic case. All things are the same.
-    kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config,
         same_kv_cache_specs,
         [
@@ -1226,7 +1226,7 @@ def test_get_kv_cache_configs_multiple_workers():
 
     # Different available memory. This is the case for TP.
     # Use the smallest memory available.
-    kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config,
         same_kv_cache_specs,
         [
@@ -1248,7 +1248,7 @@ def test_get_kv_cache_configs_multiple_workers():
     ]
 
     # Different workers have different layers.
-    kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config,
         different_layer_specs,
         [
@@ -1305,7 +1305,7 @@ def test_get_kv_cache_configs_multiple_workers():
         },
     ]
 
-    kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config,
         tp_pp_kv_cache_specs,
         [
@@ -1362,7 +1362,7 @@ def test_get_kv_cache_configs_multiple_workers():
             "layer4": new_sliding_window_spec(),
         },
     ]
-    kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config,
         different_type_layer_specs,
         [
@@ -1417,7 +1417,7 @@ def test_get_kv_cache_configs_multiple_workers():
             "layer6": new_sliding_window_spec(),
         },
     ]
-    kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config,
         different_type_layer_specs,
         [
@@ -1494,7 +1494,7 @@ def test_get_kv_cache_configs_multiple_workers():
         },
     ]
     with pytest.raises(AssertionError):
-        get_kv_cache_configs(
+        default_builder.get_kv_cache_configs(
             vllm_config,
             conflicting_layer_specs,
             [
@@ -1530,7 +1530,7 @@ def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
         [avail_memory, avail_memory * 2] if asymmetric_memory else [avail_memory] * 2
     )
 
-    kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config,
         pp_kv_cache_specs,
         available_memory,
@@ -1992,7 +1992,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_1": new_kv_cache_spec(),
         "layer_2": new_kv_cache_spec(),
     }
-    kv_cache_config_full = get_kv_cache_configs(
+    kv_cache_config_full = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_full], [mem_per_block_per_layer * 2 * 32]
     )[0]
     print(kv_cache_config_full)
@@ -2014,7 +2014,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_1": new_sliding_window_spec(),
         "layer_2": new_sliding_window_spec(),
     }
-    kv_cache_config_sliding = get_kv_cache_configs(
+    kv_cache_config_sliding = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_sliding], [mem_per_block_per_layer * 2 * 32]
     )[0]
     assert kv_cache_config_sliding == KVCacheConfig(
@@ -2038,7 +2038,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_1": new_kv_cache_spec(),
         "layer_2": new_sliding_window_spec(),
     }
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
@@ -2064,7 +2064,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_1": new_kv_cache_spec(),
         "layer_2": new_sliding_window_spec(),
     }
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
@@ -2098,7 +2098,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_5": new_sliding_window_spec(),
         "layer_6": new_sliding_window_spec(),
     }
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
@@ -2143,7 +2143,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_9": new_sliding_window_spec(),
         "layer_10": new_sliding_window_spec(),
     }
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 3 * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
@@ -2200,7 +2200,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_11": new_sliding_window_spec(),
     }
 
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 6 * 32]
     )[0]
     print(kv_cache_config_hybrid)
@@ -2244,7 +2244,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_1": new_kv_cache_spec(head_size=128),
         "layer_2": new_kv_cache_spec(head_size=64),
     }
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 3 * 32]
     )[0]
     # Layers of different page sizes pack densely into one allocation: the
@@ -2281,7 +2281,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_1": new_kv_cache_spec(head_size=64),
         "layer_2": new_sliding_window_spec(head_size=32),
     }
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
@@ -2316,7 +2316,7 @@ def test_get_kv_cache_config_one_worker():
         "layer_2": swa_spec,
     }
 
-    kv_cache_config_hybrid = get_kv_cache_configs(
+    kv_cache_config_hybrid = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
     )[0]
     padded_page_size = swa_spec.page_size_bytes
@@ -2353,7 +2353,7 @@ def test_get_kv_cache_config_one_worker():
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16
-    kv_cache_config_override_blocks = get_kv_cache_configs(
+    kv_cache_config_override_blocks = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs_full], [mem_per_block_per_layer * 2 * 32]
     )[0]
     assert kv_cache_config_override_blocks == KVCacheConfig(
@@ -2374,7 +2374,9 @@ def test_get_kv_cache_configs_attention_free():
     kv_cache_specs: dict[str, KVCacheSpec] = {}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
     vllm_config.cache_config.prefix_cache_retention_interval = None
-    kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [0])
+    kv_cache_configs = default_builder.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [0]
+    )
     assert kv_cache_configs == [
         KVCacheConfig(
             num_blocks=1,
@@ -2630,7 +2632,7 @@ def test_glm5_builder_uses_shared_planning_pipeline():
         vllm_config, groups
     )
 
-    config = builder.build_kv_cache_configs(
+    config = builder.get_kv_cache_configs(
         vllm_config, [kv_cache_spec], [required_memory + 4 * bytes_per_block]
     )[0]
     tensors = _tensor_by_layer(config)
@@ -3130,7 +3132,7 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     )
     assert full_spec.page_size_bytes == mamba_spec.page_size_bytes
 
-    groups = get_kv_cache_groups(
+    groups = default_builder.get_kv_cache_groups(
         _grouping_config(),
         {
             "model.full_attn": full_spec,
@@ -3212,7 +3214,7 @@ def test_multi_run_layer_compact_strides_place_hoisted_heads():
 
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
     vllm_config.cache_config.kv_cache_layout = "LHBNC"
-    config = kv_cache_planning.get_kv_cache_config_from_groups(
+    config = default_builder.get_kv_cache_config_from_groups(
         vllm_config,
         [
             KVCacheGroupSpec(["full.0", "full.1"], full),
@@ -3246,7 +3248,7 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     }
     assert len({spec.page_size_bytes for spec in specs.values()}) == 1
 
-    groups = get_kv_cache_groups(_grouping_config(), specs)
+    groups = default_builder.get_kv_cache_groups(_grouping_config(), specs)
 
     assert len(groups) == 2
     assert all(
@@ -3265,7 +3267,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
         "draft.0": draft,
     }
 
-    groups = get_kv_cache_groups(_grouping_config(), specs)
+    groups = default_builder.get_kv_cache_groups(_grouping_config(), specs)
     assert len(groups) == 1
     assert set(groups[0].layer_names) == set(specs)
     group_spec = groups[0].kv_cache_spec
@@ -3307,7 +3309,7 @@ def test_hidden_states_with_tp_scales_page_size():
         "cache_only_layers.48": hs_spec,
     }
 
-    groups = get_kv_cache_groups(_grouping_config(), specs)
+    groups = default_builder.get_kv_cache_groups(_grouping_config(), specs)
 
     # The hidden-state layer should be present and no assertion should fire.
     all_layers = {name for g in groups for name in g.layer_names}
@@ -3609,7 +3611,7 @@ def test_auto_fit_max_model_len():
 
     # With enough memory, max_model_len stays at the derived max
     large_available_memory = mem_per_block_per_layer * 2 * 1024  # plenty of memory
-    _kv_cache_configs = get_kv_cache_configs(
+    _kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [large_available_memory]
     )
     assert vllm_config.model_config.max_model_len == 1024
@@ -3624,7 +3626,7 @@ def test_auto_fit_max_model_len():
     # Need memory for at least max_model_len tokens
     # 32 blocks worth of memory for 2 layers = can fit 32*16=512 tokens
     limited_memory = mem_per_block_per_layer * 2 * 32
-    _kv_cache_configs = get_kv_cache_configs(
+    _kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [limited_memory]
     )
     # Should be reduced to fit in memory
@@ -3651,7 +3653,7 @@ def test_auto_fit_max_model_len_with_hybrid():
     # One extra block on top of what a 1024-token request needs: the pool
     # reserves one block as the null block.
     available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma + 1)
-    _kv_cache_configs = get_kv_cache_configs(
+    _kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [available_memory]
     )
     assert vllm_config.model_config.max_model_len == 1024
@@ -3671,7 +3673,7 @@ def test_auto_fit_max_model_len_not_triggered():
     }
 
     # This should work normally without auto-fit
-    _kv_cache_configs = get_kv_cache_configs(
+    _kv_cache_configs = default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
     )
     assert vllm_config.model_config.max_model_len == 16
@@ -3697,7 +3699,9 @@ def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
     # Plenty of raw memory (1024 blocks per layer would fit max_model_len=16384).
     large_available_memory = mem_per_block_per_layer * 2 * 1024
 
-    get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
+    default_builder.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [large_available_memory]
+    )
 
     # 32 blocks * block_size 16 = 512 token slots, so max_model_len must
     # auto-fit at or below that.
@@ -3724,7 +3728,9 @@ def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
     large_available_memory = mem_per_block_per_layer * 2 * 1024
 
     with pytest.raises(ValueError, match="max seq len"):
-        get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
+        default_builder.get_kv_cache_configs(
+            vllm_config, [kv_cache_specs], [large_available_memory]
+        )
 
 
 def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
@@ -4064,7 +4070,9 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
         available_memory = [spec.page_size_bytes * 32]
 
     with pytest.raises(ValueError, match="max seq len"):
-        get_kv_cache_configs(vllm_config, [{"layer1": spec}], available_memory)
+        default_builder.get_kv_cache_configs(
+            vllm_config, [{"layer1": spec}], available_memory
+        )
 
 
 def test_auto_fit_max_model_len_reserves_null_block():
@@ -4083,7 +4091,9 @@ def test_auto_fit_max_model_len_reserves_null_block():
     # Exactly the 1024 / 16 = 64 blocks a full-length request would need.
     available_memory = [spec.page_size_bytes * 64]
 
-    get_kv_cache_configs(vllm_config, [{"layer1": spec}], available_memory)
+    default_builder.get_kv_cache_configs(
+        vllm_config, [{"layer1": spec}], available_memory
+    )
 
     assert vllm_config.model_config.max_model_len == 63 * block_size
 
@@ -4102,12 +4112,12 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
 
     # 32 blocks -> only 31 usable after the null block: one short -> reject.
     with pytest.raises(ValueError, match="max seq len"):
-        check_enough_kv_cache_memory(
+        default_builder.check_enough_kv_cache_memory(
             vllm_config, {"layer1": spec}, spec.page_size_bytes * 32
         )
 
     # 33 blocks -> 32 usable after the null block -> accept.
-    check_enough_kv_cache_memory(
+    default_builder.check_enough_kv_cache_memory(
         vllm_config, {"layer1": spec}, spec.page_size_bytes * 33
     )
 
@@ -4208,7 +4218,7 @@ def _hybrid_specs_with_draft(draft: bool, draft_shares_target_spec: bool = False
 def test_draft_group_annotated_on_hybrid_general_path():
     # A drafter's MLA layer carries non_causal_multi_token_decode, so its group
     # is identifiable without keying off a model version.
-    groups = get_kv_cache_groups(
+    groups = default_builder.get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
     )
 
@@ -4223,7 +4233,7 @@ def test_mamba_groups_never_flagged_even_when_draft_shares_a_group():
     # flagged. What must never happen is a Mamba group being flagged: that
     # widens its lookup window to two consecutive chunks, which align-mode
     # checkpointing never produces, zeroing every lookup.
-    groups = get_kv_cache_groups(
+    groups = default_builder.get_kv_cache_groups(
         _spec_decode_grouping_config(),
         _hybrid_specs_with_draft(draft=True, draft_shares_target_spec=True),
     )
@@ -4240,7 +4250,9 @@ def test_draft_group_not_annotated_without_spec_decode():
     # when a speculative method is actually enabled.
     config = _spec_decode_grouping_config()
     config.speculative_config = None
-    groups = get_kv_cache_groups(config, _hybrid_specs_with_draft(draft=True))
+    groups = default_builder.get_kv_cache_groups(
+        config, _hybrid_specs_with_draft(draft=True)
+    )
 
     assert not any(g.is_eagle_group for g in groups)
 
@@ -4249,7 +4261,7 @@ def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     # No group carries the draft marker, so consumers fall back to
     # conservative behavior that silently breaks reuse for Mamba groups.
     # That must at least be visible.
-    groups = get_kv_cache_groups(
+    groups = default_builder.get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
     )
 
@@ -4267,14 +4279,14 @@ def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
         "target.attn.0": new_mla_spec(block_size=64),
         "target.attn.1": new_mla_spec(block_size=64),
     }
-    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
+    groups = default_builder.get_kv_cache_groups(_spec_decode_grouping_config(), specs)
 
     assert not any(g.is_eagle_group for g in groups)
     assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
-    get_kv_cache_groups(
+    default_builder.get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
     )
 
@@ -4302,7 +4314,7 @@ def test_deepseek_v4_draft_group_annotated_on_packed_path():
     # DeepseekV4's MTP block reuses the target's decoder layer, so its spec
     # carries no draft marker and only the positional rule can find it. This
     # pins the pre-existing behaviour that the unified annotator must preserve.
-    groups = get_kv_cache_groups(
+    groups = default_builder.get_kv_cache_groups(
         _spec_decode_grouping_config(method="mtp", model_type="deepseek_v4"),
         _deepseek_v4_specs(model_version=None),
     )
@@ -4316,7 +4328,7 @@ def test_deepseek_v4_annotation_requires_model_type():
     # The positional rule is only sound for DeepseekV4, where the draft layer
     # is known to be registered last. Without that model gate nothing may be
     # flagged, however the grouping happens to fall out.
-    groups = get_kv_cache_groups(
+    groups = default_builder.get_kv_cache_groups(
         _spec_decode_grouping_config(method="mtp", model_type="other"),
         _deepseek_v4_specs(),
     )

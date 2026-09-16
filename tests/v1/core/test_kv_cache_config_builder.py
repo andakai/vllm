@@ -6,12 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_config_builder import (
-    KVCacheConfigBuilder,
-    _load_builder,
-    resolve_builder,
-)
+from vllm.platforms import Platform, current_platform
+from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 
 
 def _skip_glm5_on_xpu():
@@ -26,39 +23,47 @@ def _make_vllm_config(builder_cls_path: str | None = None) -> MagicMock:
     return cfg
 
 
-class CustomBuilder(KVCacheConfigBuilder):
+CUSTOM_PATH = "tests.v1.core.test_kv_cache_config_builder.CustomBuilder"
+DEFAULT_PATH = "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
+
+
+class CustomBuilder(DefaultKVCacheConfigBuilder):
     """A test builder subclass."""
 
     pass
 
 
-class TestLoadBuilder:
-    def test_load_default_builder(self):
-        builder = _load_builder(
-            "vllm.v1.core.kv_cache_config_builder.KVCacheConfigBuilder"
-        )
-        assert isinstance(builder, KVCacheConfigBuilder)
-
-    def test_load_nonexistent_raises(self):
-        with pytest.raises((ImportError, AttributeError)):
-            _load_builder("vllm.nonexistent.module.Builder")
+@pytest.fixture(autouse=True)
+def _reset_active_builder():
+    KVCacheConfigBuilder.reset()
+    yield
+    KVCacheConfigBuilder.reset()
 
 
-class TestResolveBuilder:
-    @patch("vllm.platforms.current_platform")
-    def test_default_when_no_overrides(self, mock_platform):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = None
+class TestPlatformHookResolution:
+    """The platform hook owns the resolution priority."""
+
+    def test_default_hook_prefers_model_declaration(self):
+        cfg = _make_vllm_config(builder_cls_path=CUSTOM_PATH)
+        assert Platform.get_kv_cache_config_builder_cls(cfg) == CUSTOM_PATH
+
+    def test_default_hook_falls_back_to_default_builder(self):
         cfg = _make_vllm_config(builder_cls_path=None)
-        builder = resolve_builder(cfg)
-        assert type(builder) is KVCacheConfigBuilder
+        assert Platform.get_kv_cache_config_builder_cls(cfg) == DEFAULT_PATH
+
+
+class TestBuilderResolution:
+    @patch("vllm.platforms.current_platform")
+    def test_resolves_default_builder(self, mock_platform):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        assert type(KVCacheConfigBuilder._resolve(cfg)) is DefaultKVCacheConfigBuilder
 
     @patch("vllm.platforms.current_platform")
     def test_model_declared_builder(self, mock_platform):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = None
-        cls_path = "tests.v1.core.test_kv_cache_config_builder.CustomBuilder"
-        cfg = _make_vllm_config(builder_cls_path=cls_path)
-        builder = resolve_builder(cfg)
-        assert isinstance(builder, CustomBuilder)
+        mock_platform.get_kv_cache_config_builder_cls.return_value = CUSTOM_PATH
+        cfg = _make_vllm_config()
+        assert isinstance(KVCacheConfigBuilder._resolve(cfg), CustomBuilder)
 
     def test_glm5_model_declared_builder(self):
         _skip_glm5_on_xpu()
@@ -71,77 +76,109 @@ class TestResolveBuilder:
             "Glm5NextKVCacheConfigBuilder"
         )
         with patch("vllm.platforms.current_platform") as mock_platform:
-            mock_platform.get_kv_cache_config_builder_cls.return_value = None
-            assert isinstance(resolve_builder(cfg), Glm5NextKVCacheConfigBuilder)
+            mock_platform.get_kv_cache_config_builder_cls.return_value = (
+                cfg.model_config.kv_cache_config_builder_cls
+            )
+            assert isinstance(
+                KVCacheConfigBuilder._resolve(cfg), Glm5NextKVCacheConfigBuilder
+            )
 
     @patch("vllm.platforms.current_platform")
-    def test_platform_overrides_model(self, mock_platform):
-        platform_path = "tests.v1.core.test_kv_cache_config_builder.CustomBuilder"
-        mock_platform.get_kv_cache_config_builder_cls.return_value = platform_path
-        # Model declares default, but platform overrides
-        cfg = _make_vllm_config(builder_cls_path=None)
-        builder = resolve_builder(cfg)
-        assert isinstance(builder, CustomBuilder)
-
-
-class TestBuilderSingleton:
-    def setup_method(self):
-        import vllm.v1.core.kv_cache_config_builder as builder_mod
-
-        builder_mod._BUILDER = None
-        builder_mod._BUILDER_KEY = None
-
-    def teardown_method(self):
-        import vllm.v1.core.kv_cache_config_builder as builder_mod
-
-        builder_mod._BUILDER = None
-        builder_mod._BUILDER_KEY = None
+    def test_resolves_once_and_caches(self, mock_platform):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = CUSTOM_PATH
+        cfg = _make_vllm_config()
+        assert KVCacheConfigBuilder._resolve(cfg) is KVCacheConfigBuilder._resolve(cfg)
 
     @patch("vllm.platforms.current_platform")
-    def test_returns_cached_builder_for_same_key(self, mock_platform):
-        import vllm.v1.core.kv_cache_config_builder as builder_mod
-
-        mock_platform.get_kv_cache_config_builder_cls.return_value = None
-        cfg = _make_vllm_config(builder_cls_path=None)
-        first = resolve_builder(cfg)
-        second = resolve_builder(cfg)
-        assert first is second
-        assert builder_mod._BUILDER is first
-
-    @patch("vllm.platforms.current_platform")
-    def test_reloads_when_model_builder_changes(self, mock_platform):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = None
-        default_cfg = _make_vllm_config(builder_cls_path=None)
-        custom_cfg = _make_vllm_config(
-            builder_cls_path="tests.v1.core.test_kv_cache_config_builder.CustomBuilder"
-        )
-        assert type(resolve_builder(default_cfg)) is KVCacheConfigBuilder
-        assert type(resolve_builder(custom_cfg)) is CustomBuilder
-        assert type(resolve_builder(default_cfg)) is KVCacheConfigBuilder
+    def test_reset_forces_resolution_again(self, mock_platform):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = CUSTOM_PATH
+        cfg = _make_vllm_config()
+        first = KVCacheConfigBuilder._resolve(cfg)
+        KVCacheConfigBuilder.reset()
+        second = KVCacheConfigBuilder._resolve(cfg)
+        assert first is not second
+        assert isinstance(second, CustomBuilder)
 
     @patch("vllm.platforms.current_platform")
-    def test_planning_entry_points_use_the_builder(self, mock_platform):
-        import vllm.v1.core.kv_cache_config_builder as builder_mod
-
-        builder = MagicMock()
-        builder.build_kv_cache_configs.return_value = []
-        builder.get_kv_cache_groups.return_value = []
-        mock_platform.get_kv_cache_config_builder_cls.return_value = None
-        cfg = _make_vllm_config(
-            builder_cls_path="tests.v1.core.test_kv_cache_config_builder.CustomBuilder"
-        )
+    def test_entry_points_delegate_to_resolved_builder(self, mock_platform):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = CUSTOM_PATH
+        cfg = _make_vllm_config()
+        KVCacheConfigBuilder._resolve(cfg)
+        active = KVCacheConfigBuilder._active
+        assert isinstance(active, CustomBuilder)
         with (
-            patch.object(builder_mod, "_load_builder", return_value=builder) as load,
-            patch.object(builder_mod, "_BUILDER", None),
-            patch.object(builder_mod, "_BUILDER_KEY", None),
+            patch.object(active, "get_kv_cache_configs", return_value=[]) as g,
+            patch.object(active, "get_kv_cache_groups", return_value=[]) as h,
         ):
-            assert builder_mod.build_kv_cache_configs(cfg, [], [0]) == []
-            builder.build_kv_cache_configs.assert_called_once()
-            assert builder_mod.get_kv_cache_groups(cfg, {}) == []
-            builder.get_kv_cache_groups.assert_called_once()
-            # Second call reuses the cached builder without re-loading.
-            assert builder_mod.build_kv_cache_configs(cfg, [], [0]) == []
-            assert load.call_count == 1
+            assert KVCacheConfigBuilder.get_kv_cache_configs(cfg, [], [0]) == []
+            g.assert_called_once()
+            assert KVCacheConfigBuilder.get_kv_cache_groups(cfg, {}) == []
+            h.assert_called_once()
+
+
+class TestPlatformCustomPriority:
+    """A vendor platform can override the hook to customize priority."""
+
+    def test_platform_builder_wins_over_model_declaration(self):
+        class PlatformFirstPlatform(Platform):
+            @classmethod
+            def get_kv_cache_config_builder_cls(cls, vllm_config):
+                return CUSTOM_PATH
+
+        cfg = _make_vllm_config(builder_cls_path=CUSTOM_PATH)
+        # Model declares CustomBuilder too; the platform forces it anyway.
+        assert PlatformFirstPlatform.get_kv_cache_config_builder_cls(cfg) == CUSTOM_PATH
+        with patch("vllm.platforms.current_platform", PlatformFirstPlatform):
+            assert isinstance(KVCacheConfigBuilder._resolve(cfg), CustomBuilder)
+
+    def test_platform_delegates_to_model_declaration(self):
+        class ModelFirstPlatform(Platform):
+            @classmethod
+            def get_kv_cache_config_builder_cls(cls, vllm_config):
+                model_path = vllm_config.model_config.kv_cache_config_builder_cls
+                return model_path or DEFAULT_PATH
+
+        cfg = _make_vllm_config(builder_cls_path=CUSTOM_PATH)
+        assert ModelFirstPlatform.get_kv_cache_config_builder_cls(cfg) == CUSTOM_PATH
+
+
+class TestDefaultBuilderDelegation:
+    """Without a custom builder, the methods hit the default builder, which
+    implements the planning steps in :mod:`kv_cache_planning`."""
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_groups")
+    def test_get_kv_cache_groups_delegates_to_default(self, mock_impl, mock_platform):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        spec = {"layer": MagicMock()}
+        assert (
+            KVCacheConfigBuilder.get_kv_cache_groups(cfg, spec)
+            is mock_impl.return_value
+        )
+        mock_impl.assert_called_once_with(cfg, spec)
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_config_from_groups")
+    def test_get_kv_cache_config_from_groups_delegates_to_default(
+        self, mock_impl, mock_platform
+    ):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        groups = [MagicMock()]
+        result = KVCacheConfigBuilder.get_kv_cache_config_from_groups(cfg, groups, 0)
+        assert result is mock_impl.return_value
+        mock_impl.assert_called_once_with(cfg, groups, 0)
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_configs")
+    def test_get_kv_cache_configs_delegates_to_default(self, mock_impl, mock_platform):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        specs, memory = [MagicMock()], [0]
+        result = KVCacheConfigBuilder.get_kv_cache_configs(cfg, specs, memory)
+        assert result is mock_impl.return_value
+        mock_impl.assert_called_once_with(cfg, specs, memory)
 
 
 def test_glm5_models_declare_kv_cache_builder():
@@ -173,7 +210,7 @@ def test_glm5_builder_preserves_generic_grouping_precedence():
     builder = Glm5NextKVCacheConfigBuilder()
 
     with patch.object(
-        KVCacheConfigBuilder, "get_kv_cache_groups", return_value=[]
+        DefaultKVCacheConfigBuilder, "get_kv_cache_groups", return_value=[]
     ) as default_grouping:
         assert builder.get_kv_cache_groups(cfg, {}) == []
 
