@@ -169,24 +169,3 @@ def test_glm5_builder_preserves_generic_grouping_precedence():
         assert builder.get_kv_cache_groups(cfg, {}) == []
 
     default_grouping.assert_called_once_with(cfg, {})
-
-
-def test_glm5_builder_preserves_host_memory_placement():
-    from vllm.models.glm5next.kv_cache_config import (
-        Glm5NextKVCacheConfigBuilder,
-    )
-
-    cfg = _make_vllm_config()
-    cfg.attention_config.hisparse_config = None
-    cfg.cache_config.kv_cache_host_memory_bytes = 1
-    builder = Glm5NextKVCacheConfigBuilder()
-    expected = MagicMock()
-
-    with patch.object(
-        KVCacheConfigBuilder,
-        "get_kv_cache_config_from_groups",
-        return_value=expected,
-    ) as default_placement:
-        assert builder.get_kv_cache_config_from_groups(cfg, [], 0) is expected
-
-    default_placement.assert_called_once_with(cfg, [], 0)

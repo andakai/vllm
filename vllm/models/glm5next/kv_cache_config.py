@@ -247,10 +247,7 @@ class Glm5NextKVCacheConfigBuilder(KVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
         available_memory: int,
     ) -> KVCacheConfig:
-        if (
-            vllm_config.attention_config.hisparse_config is not None
-            or vllm_config.cache_config.kv_cache_host_memory_bytes is not None
-        ):
+        if vllm_config.attention_config.hisparse_config is not None:
             return super().get_kv_cache_config_from_groups(
                 vllm_config, kv_cache_groups, available_memory
             )
