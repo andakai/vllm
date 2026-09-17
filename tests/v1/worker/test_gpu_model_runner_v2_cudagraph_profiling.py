@@ -228,6 +228,41 @@ def test_model_runner_delegates_to_cudagraph_utils(monkeypatch):
     assert runner.profile_cudagraph_memory() == 42
 
 
+def test_minimal_kv_cache_uses_declarative_plan(monkeypatch):
+    from vllm.v1.core import kv_cache_plan
+
+    spec = {"layer": object()}
+    minimal_config = SimpleNamespace(num_blocks=5)
+    calls = []
+
+    def get_profiling_config(config, cache_spec, blocks):
+        calls.append((config, cache_spec, blocks))
+        return minimal_config
+
+    monkeypatch.setattr(
+        kv_cache_plan,
+        "get_profiling_kv_cache_config",
+        get_profiling_config,
+    )
+    runner = SimpleNamespace(
+        vllm_config=object(),
+        get_kv_cache_spec=lambda: spec,
+        max_num_reqs=8,
+        compilation_config=SimpleNamespace(max_cudagraph_capture_size=4),
+        cache_config=SimpleNamespace(num_gpu_blocks=None),
+    )
+    initialized = []
+    runner.initialize_kv_cache = lambda config, is_profiling: initialized.append(
+        (config, is_profiling)
+    )
+
+    cgu._init_minimal_kv_cache_for_profiling(runner)
+
+    assert calls == [(runner.vllm_config, spec, 4)]
+    assert initialized == [(minimal_config, True)]
+    assert runner.cache_config.num_gpu_blocks == 5
+
+
 def test_extrapolate_full_graph_memory():
     mib = 1 << 20
     # No samples (e.g. no FULL graphs): nothing to add.
