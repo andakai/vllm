@@ -162,7 +162,7 @@ def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
 @pytest.mark.parametrize("second_level", [1, 2])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
-    """Repeated sleep after KV-only wake preserves mappings and recoverability."""
+    """Repeated sleep releases restored KV without re-sleeping weights."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = LLM(
         "Qwen/Qwen3-0.6B",
@@ -185,8 +185,8 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
     mapped_before = llm.collective_rpc(get_mapped_bytes)[0]
     assert mapped_before > 0
     llm.sleep(level=second_level)
-    assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
-    llm.wake_up(tags=["weights"])
+    assert llm.collective_rpc(get_mapped_bytes)[0] == 0
+    llm.wake_up()
     if first_level == 2:
         llm.collective_rpc("reload_weights")
     assert not llm.llm_engine.is_sleeping()
