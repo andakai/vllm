@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.core.kv_cache_plan import KVCachePlanner
 else:
     FlexibleArgumentParser = object
 
@@ -559,6 +560,15 @@ class Platform:
         The config is passed by reference, so it can be modified in place.
         """
         pass
+
+    @classmethod
+    def get_kv_cache_planner(
+        cls,
+        vllm_config: "VllmConfig",
+        delegate: "KVCachePlanner",
+    ) -> "KVCachePlanner":
+        """Return, wrap, or replace the model-aware KV cache planner."""
+        return delegate
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
