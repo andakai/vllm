@@ -1568,6 +1568,12 @@ def get_kv_cache_config_from_groups(
         )
 
     if pool_plan is not None:
+        layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if not layout.is_block_compact:
+            raise ValueError(
+                "Declarative KV cache pool plans require a block-compact "
+                f"layout, but got {layout.name}."
+            )
         bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, pool_plan)
         num_blocks = may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block

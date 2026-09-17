@@ -20,9 +20,11 @@ from vllm.v1.core.kv_cache_plan import (
 )
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
+    get_kv_cache_config_from_groups,
     materialize_kv_cache_group_plan,
 )
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 pytestmark = pytest.mark.cpu_test
 
@@ -111,6 +113,18 @@ def test_plan_data_is_frozen_and_core_validates_it():
         pytest.raises(ValueError, match="one group"),
     ):
         _get_kv_cache_bytes_per_block([same_group], same_region)
+
+
+def test_pool_plan_rejects_non_block_compact_layout():
+    spec = MagicMock(page_size_bytes=512)
+    group = KVCacheGroupSpec(["layer"], spec)
+    plan = KVCachePoolPlan((KVCachePoolRegion(512, ("layer",)),))
+    config = MagicMock()
+    config.attention_config.hisparse_config = None
+    config.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LHBNC
+
+    with pytest.raises(ValueError, match="block-compact"):
+        get_kv_cache_config_from_groups(config, [group], 1536, plan)
 
 
 def test_profiling_uses_resolved_provider_and_restores_override():
