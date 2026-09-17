@@ -157,6 +157,30 @@ def test_minimal_kv_cache_profiling_uses_resolved_planner(monkeypatch):
     assert runner.cache_config.num_gpu_blocks_override is None
 
 
+def test_legacy_minimal_kv_cache_restores_override_on_planning_error(monkeypatch):
+    from vllm.v1.core import kv_cache_utils
+
+    class Planner:
+        def plan(self, kv_cache_spec, available_memory):
+            raise RuntimeError("planning failed")
+
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        get_kv_cache_spec=dict,
+        max_num_reqs=8,
+        compilation_config=SimpleNamespace(max_cudagraph_capture_size=4),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=17),
+    )
+    monkeypatch.setattr(
+        kv_cache_utils, "get_kv_cache_planner", lambda config: Planner()
+    )
+
+    with pytest.raises(RuntimeError, match="planning failed"):
+        mrv2.GPUModelRunner._init_minimal_kv_cache_for_profiling(runner)
+
+    assert runner.cache_config.num_gpu_blocks_override == 17
+
+
 def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.NONE)
