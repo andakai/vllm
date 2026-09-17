@@ -21,6 +21,7 @@ import torch
 from tests.utils import create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker import gpu_model_runner as legacy_mr
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
 
@@ -176,7 +177,7 @@ def test_legacy_minimal_kv_cache_restores_override_on_planning_error(monkeypatch
     )
 
     with pytest.raises(RuntimeError, match="planning failed"):
-        mrv2.GPUModelRunner._init_minimal_kv_cache_for_profiling(runner)
+        legacy_mr.GPUModelRunner._init_minimal_kv_cache_for_profiling(runner)
 
     assert runner.cache_config.num_gpu_blocks_override == 17
 
