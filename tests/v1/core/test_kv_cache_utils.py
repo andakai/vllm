@@ -2486,6 +2486,8 @@ def _glm5_provider():
 
 
 def _glm5_groups(vllm_config, kv_cache_spec):
+    if vllm_config.cache_config.kv_cache_layout is None:
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
     provider = _glm5_provider()
     plan = provider.get_group_plan(vllm_config, kv_cache_spec)
     if plan is None:
