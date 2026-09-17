@@ -109,6 +109,33 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
+@pytest.mark.parametrize("offload", [False, True], ids=["discard", "offload"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_sleep_selected_tags_preserves_other_pools(offload):
+    """Tag selection is independent of offload policy, including an empty selection."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("selected"):
+        selected = torch.ones(1024, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("resident"):
+        resident = torch.full((1024,), 7.0, device=DEVICE_TYPE)
+    mapped_before = mapped_usage(allocator)
+
+    allocator.sleep(offload_tags=(), tags=())
+    assert mapped_usage(allocator) == mapped_before
+    torch.testing.assert_close(selected, torch.ones_like(selected))
+    torch.testing.assert_close(resident, torch.full_like(resident, 7.0))
+
+    allocator.sleep(offload_tags=("selected",) if offload else (), tags=("selected",))
+    assert 0 < mapped_usage(allocator) < mapped_before
+    torch.testing.assert_close(resident, torch.full_like(resident, 7.0))
+
+    allocator.wake_up(tags=["selected"])
+    assert mapped_usage(allocator) == mapped_before
+    if offload:
+        torch.testing.assert_close(selected, torch.ones_like(selected))
+    torch.testing.assert_close(resident, torch.full_like(resident, 7.0))
+
+
 @pytest.mark.parametrize("full_sleep", [0, 1, 2], ids=["kv-only", "sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
@@ -162,7 +189,7 @@ def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
 @pytest.mark.parametrize("second_level", [1, 2])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
-    """Repeated sleep after KV-only wake preserves mappings and recoverability."""
+    """Repeated sleep releases restored KV without re-sleeping weights."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = LLM(
         "Qwen/Qwen3-0.6B",
@@ -185,8 +212,8 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
     mapped_before = llm.collective_rpc(get_mapped_bytes)[0]
     assert mapped_before > 0
     llm.sleep(level=second_level)
-    assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
-    llm.wake_up(tags=["weights"])
+    assert llm.collective_rpc(get_mapped_bytes)[0] == 0
+    llm.wake_up()
     if first_level == 2:
         llm.collective_rpc("reload_weights")
     assert not llm.llm_engine.is_sleeping()

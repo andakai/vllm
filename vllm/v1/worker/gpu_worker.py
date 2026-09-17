@@ -243,12 +243,12 @@ class Worker(WorkerBase):
             )
         return self._sleep_mode_backend
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(self, level: int = 1, tags: tuple[str, ...] | None = None) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
         # Save the buffers before level 2 sleep
-        if level == 2:
+        if level == 2 and (tags is None or "weights" in tags):
             model = self.model_runner.model
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
@@ -259,7 +259,7 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
-        self.sleep_mode_backend.suspend(level)
+        self.sleep_mode_backend.suspend(level, tags=tags)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
