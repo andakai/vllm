@@ -855,6 +855,7 @@ _OOT_SUPPORTED_MODELS = {
 @dataclass(frozen=True)
 class _ModelInfo:
     architecture: str
+    kv_cache_config_builder_cls: str | None
     is_text_generation_model: bool
     is_pooling_model: bool
     attn_type: AttnTypeStr
@@ -881,6 +882,9 @@ class _ModelInfo:
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
         return _ModelInfo(
             architecture=model.__name__,
+            kv_cache_config_builder_cls=getattr(
+                model, "kv_cache_config_builder_cls", None
+            ),
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
             default_seq_pooling_type=get_default_seq_pooling_type(model),

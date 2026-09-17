@@ -1075,6 +1075,10 @@ class ModelConfig:
         """The architecture vllm actually used."""
         return self._architecture
 
+    @property
+    def kv_cache_config_builder_cls(self) -> str | None:
+        return self._model_info.kv_cache_config_builder_cls
+
     def maybe_pull_model_tokenizer_for_runai(self, model: str, tokenizer: str) -> None:
         """Pull model/tokenizer from Object Storage to temporary
         directory when needed.

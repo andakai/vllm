@@ -9,10 +9,8 @@ import pytest
 from vllm import LLM
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
-)
+from vllm.v1.core.kv_cache_config_builder import build_kv_cache_configs
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
@@ -88,7 +86,7 @@ def can_initialize(
             [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
         )
         self.model_executor.set_kv_cache_layout(layout.name)
-        kv_cache_configs = get_kv_cache_configs(
+        kv_cache_configs = build_kv_cache_configs(
             vllm_config,
             kv_cache_specs,
             [10 * GiB_bytes],
