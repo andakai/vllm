@@ -118,6 +118,41 @@ def test_platform_composes_model_aware_delegate(mode):
         assert resolved is not TestPlatform.seen_delegate
 
 
+def test_platform_callbacks_take_precedence_over_model_callbacks():
+    platform_group_planner = MagicMock()
+    platform_region_planner = MagicMock()
+    model_group_planner = MagicMock()
+    model_region_planner = MagicMock()
+    captured = []
+
+    def core(request):
+        captured.append(request)
+        return []
+
+    class ModelPlanner:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def __call__(self, request):
+            return self.delegate(
+                request.with_declarative_plan(model_group_planner, model_region_planner)
+            )
+
+    model = ModelPlanner(core)
+    request = KVCachePlanningRequest(
+        MagicMock(),
+        [],
+        [],
+        group_planner=platform_group_planner,
+        region_planner=platform_region_planner,
+    )
+
+    model(request)
+
+    assert captured[0].group_planner is platform_group_planner
+    assert captured[0].region_planner is platform_region_planner
+
+
 def test_same_planner_entry_handles_final_and_profiling():
     RecordingPlanner.calls.clear()
     config = _config(planner_path=PLANNER_PATH)

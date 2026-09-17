@@ -54,8 +54,8 @@ class KVCachePlanningRequest:
     ) -> "KVCachePlanningRequest":
         return replace(
             self,
-            group_planner=group_planner,
-            region_planner=region_planner,
+            group_planner=self.group_planner or group_planner,
+            region_planner=self.region_planner or region_planner,
         )
 
 
