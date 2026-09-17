@@ -2556,7 +2556,7 @@ def test_kv_cache_policy_resolver_precedence_and_config_isolation(monkeypatch):
         kv_cache_utils.resolve_kv_cache_planning_policy(config_a), PlatformPolicy
     )
 
-    default_config = SimpleNamespace(model_config=SimpleNamespace())
+    default_config = SimpleNamespace()
     monkeypatch.setattr(
         kv_cache_utils.current_platform,
         "get_kv_cache_planning_policy",

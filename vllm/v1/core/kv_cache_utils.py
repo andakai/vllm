@@ -1170,10 +1170,11 @@ def resolve_kv_cache_planning_policy(
 ) -> KVCachePlanningPolicy:
     """Resolve a fresh policy with platform > model > default precedence."""
     policy_cls = current_platform.get_kv_cache_planning_policy(vllm_config)
-    if policy_cls is None and isinstance(vllm_config.model_config, ModelConfig):
+    model_config = getattr(vllm_config, "model_config", None)
+    if policy_cls is None and isinstance(model_config, ModelConfig):
         from vllm.model_executor.model_loader.utils import get_model_cls
 
-        model_cls = get_model_cls(vllm_config.model_config)
+        model_cls = get_model_cls(model_config)
         policy_cls = getattr(model_cls, "kv_cache_planning_policy", None)
     return (policy_cls or KVCachePlanningPolicy)(vllm_config)
 
