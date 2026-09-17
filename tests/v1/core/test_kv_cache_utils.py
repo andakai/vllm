@@ -114,6 +114,7 @@ def _glm5_test_config(pp_size: int = 1):
             disable_hybrid_kv_cache_manager=False,
         ),
         attention_config=SimpleNamespace(hisparse_config=None),
+        speculative_config=None,
         cache_config=cache_config,
         kv_transfer_config=None,
         max_in_flight_tokens=1,
