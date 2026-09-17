@@ -561,6 +561,11 @@ class Platform:
         pass
 
     @classmethod
+    def get_kv_cache_plan_provider_cls(cls, vllm_config: "VllmConfig") -> str | None:
+        """Return a platform-specific KV cache plan provider, if any."""
+        return None
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """Check and update the configuration for the current platform.
 
