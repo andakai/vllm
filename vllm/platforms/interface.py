@@ -573,6 +573,11 @@ class Platform:
         pass
 
     @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str | None:
+        """Return a platform KV cache builder override, if any."""
+        return None
+
+    @classmethod
     def _find_non_ssm_backend(
         cls, vllm_config: "VllmConfig"
     ) -> "type[AttentionBackend] | None":
