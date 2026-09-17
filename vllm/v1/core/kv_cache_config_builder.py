@@ -21,6 +21,13 @@ if TYPE_CHECKING:
 _DEFAULT_BUILDER = "vllm.v1.core.kv_cache_config_builder.KVCacheConfigBuilder"
 
 
+def _hisparse_enabled(vllm_config: VllmConfig) -> bool:
+    return (
+        getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None)
+        is not None
+    )
+
+
 def resolve_kv_cache_config_builder(
     vllm_config: VllmConfig,
 ) -> KVCacheConfigBuilder:
@@ -93,7 +100,7 @@ class KVCacheConfigBuilder:
 
         if (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and vllm_config.attention_config.hisparse_config is None
+            and not _hisparse_enabled(vllm_config)
             and kv_cache_spec
         ):
             groups = self._get_custom_kv_cache_groups(vllm_config, kv_cache_spec)
@@ -107,7 +114,7 @@ class KVCacheConfigBuilder:
         kv_cache_groups: list[KVCacheGroupSpec],
         available_memory: int,
     ) -> KVCacheConfig:
-        from vllm.v1.hisparse.layout import (
+        from vllm.v1.core.kv_cache_utils import (
             get_hisparse_host_pool_bytes,
             get_hisparse_kv_cache_config,
         )
@@ -121,7 +128,7 @@ class KVCacheConfigBuilder:
                     vllm_config.cache_config.prefix_cache_retention_interval
                 ),
             )
-        if vllm_config.attention_config.hisparse_config is not None:
+        if _hisparse_enabled(vllm_config):
             return get_hisparse_kv_cache_config(
                 vllm_config,
                 kv_cache_groups,
@@ -201,10 +208,7 @@ class KVCacheConfigBuilder:
         available_memory: int,
     ) -> int:
         original_max = vllm_config.model_config.max_model_len
-        hisparse_enabled = (
-            vllm_config.attention_config.hisparse_config is not None
-            and bool(kv_cache_groups)
-        )
+        hisparse_enabled = _hisparse_enabled(vllm_config) and bool(kv_cache_groups)
 
         def fits(model_len: int) -> bool:
             vllm_config.model_config.max_model_len = model_len

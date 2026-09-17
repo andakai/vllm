@@ -23,6 +23,12 @@ from vllm.v1.hisparse.layout import (
     get_hisparse_gpu_memory_usage,
     get_hisparse_kv_cache_groups,
 )
+from vllm.v1.hisparse.layout import (
+    get_hisparse_host_pool_bytes as get_hisparse_host_pool_bytes,
+)
+from vllm.v1.hisparse.layout import (
+    get_hisparse_kv_cache_config as get_hisparse_kv_cache_config,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
