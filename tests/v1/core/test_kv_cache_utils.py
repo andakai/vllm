@@ -40,6 +40,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    _get_kv_cache_configs,
     check_enough_kv_cache_memory,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
@@ -150,6 +151,14 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         config, [group], available_memory=2**30
     )
     assert cache_config.num_blocks == 7
+    profiling_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config,
+        [group],
+        available_memory=0,
+        fixed_num_blocks=3,
+    )
+    assert profiling_config.num_blocks == 3
+    assert config.cache_config.num_gpu_blocks_override == 7
     assert cache_config.hisparse_host_num_blocks is not None
     assert cache_config.hisparse_host_num_blocks > 7
 
@@ -2475,6 +2484,31 @@ def _glm5_like_kv_cache_spec(
     return kv_cache_spec, mamba_layers
 
 
+def _glm5_provider():
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        pytest.skip("GLM-5.3-Flash does not support XPU")
+    from vllm.models.glm5next.kv_cache_plan import Glm5NextKVCachePlanProvider
+
+    return Glm5NextKVCachePlanProvider()
+
+
+def _glm5_groups(vllm_config, kv_cache_spec):
+    if vllm_config.cache_config.kv_cache_layout is None:
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    provider = _glm5_provider()
+    groups = provider.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    if groups is None:
+        return kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    kv_cache_utils.validate_kv_cache_groups(kv_cache_spec, groups)
+    return groups
+
+
+def _glm5_pool_plan(vllm_config, groups):
+    return _glm5_provider().get_kv_cache_regions(vllm_config, tuple(groups))
+
+
 def _glm5_like_kv_cache_spec_with_tail(
     mamba_spec_factory=new_mamba_spec,
 ) -> dict[str, KVCacheSpec]:
@@ -2523,7 +2557,8 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
 
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = _glm5_groups(vllm_config, kv_cache_spec)
+    pool_plan = _glm5_pool_plan(vllm_config, groups)
     uniform_groups = [
         group
         for group in groups
@@ -2547,7 +2582,7 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
         assert group.kv_cache_spec.page_size_padded == mla_page
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups, pool_plan)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     # Every block id is charged the full per-block sum.
@@ -2555,15 +2590,53 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
     mamba_blocks_per_group = 1 + new_mamba_spec().num_speculative_blocks
     blocks_per_request = attn_blocks + 4 * mamba_blocks_per_group
     assert (
-        kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, groups)
+        kv_cache_utils._max_memory_usage_bytes_from_groups(
+            vllm_config, groups, pool_plan
+        )
         == blocks_per_request * bytes_per_block
     )
 
     available_memory = bytes_per_block * 100 + 1
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory
+        vllm_config, groups, available_memory, pool_plan=pool_plan
     )
     assert kv_cache_config.num_blocks == 100
+    provider = _glm5_provider()
+    planned_config = _get_kv_cache_configs(
+        vllm_config,
+        [kv_cache_spec],
+        [available_memory],
+        plan_provider=provider,
+    )[0]
+    assert planned_config.kv_cache_tensors == kv_cache_config.kv_cache_tensors
+
+    rank_configs = _get_kv_cache_configs(
+        vllm_config,
+        [kv_cache_spec, kv_cache_spec],
+        [bytes_per_block * 100, bytes_per_block * 80],
+        plan_provider=provider,
+    )
+    assert [config.num_blocks for config in rank_configs] == [80, 80]
+
+    vllm_config.cache_config.num_gpu_blocks_override = 90
+    try:
+        override_config = _get_kv_cache_configs(
+            vllm_config,
+            [kv_cache_spec],
+            [available_memory],
+            plan_provider=provider,
+        )[0]
+    finally:
+        vllm_config.cache_config.num_gpu_blocks_override = None
+    assert override_config.num_blocks == 90
+
+    with pytest.raises(ValueError, match="To serve at least one request"):
+        _get_kv_cache_configs(
+            vllm_config,
+            [kv_cache_spec],
+            [bytes_per_block * blocks_per_request],
+            plan_provider=provider,
+        )
 
     # Every logical layer has a view into one backing allocation. Mamba views
     # alias their corresponding MLA slot by using the same byte offset.
@@ -2603,7 +2676,8 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     tail_logical_page = kv_cache_spec["layers.3.tail"].page_size_bytes
     assert tail_logical_page < idx_page
 
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = _glm5_groups(vllm_config, kv_cache_spec)
+    pool_plan = _glm5_pool_plan(vllm_config, groups)
     tail_group = next(
         group
         for group in groups
@@ -2621,11 +2695,14 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     )
     assert tail_inner.page_size_padded == idx_page
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups, pool_plan)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        vllm_config, groups, bytes_per_block * 100 + 1
+        vllm_config,
+        groups,
+        bytes_per_block * 100 + 1,
+        pool_plan=pool_plan,
     )
     assert kv_cache_config.num_blocks == 100
     # Tail layers get logical views but no additional storage: each view aliases
@@ -2640,10 +2717,9 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
 
     # The layout detector surfaces the sibling names in layer order for the
     # accounting and connector paths.
-    layout = kv_cache_utils._glm5_next_tensor_layout(kv_cache_config.kv_cache_groups)
-    assert layout is not None
-    assert layout[3] == [f"layers.{4 * i + 3}.indexer" for i in range(11)]
-    assert layout[6] == [f"layers.{4 * i + 3}.tail" for i in range(11)]
+    assert [region.layers for region in pool_plan[-11:]] == [
+        (f"layers.{4 * i + 3}.indexer", f"layers.{4 * i + 3}.tail") for i in range(11)
+    ]
 
     # Accounting charges exactly one extra shared block per request for the
     # tail, not a per-sequence allocation.
@@ -2657,7 +2733,9 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     mamba_blocks_per_group = 1 + new_mamba_spec().num_speculative_blocks
     blocks_per_request = attn_blocks + 4 * mamba_blocks_per_group + 1
     assert (
-        kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, groups)
+        kv_cache_utils._max_memory_usage_bytes_from_groups(
+            vllm_config, groups, pool_plan
+        )
         == blocks_per_request * bytes_per_block
     )
 
@@ -2671,9 +2749,7 @@ def test_glm5_kpool_tail_does_not_drag_hash_block_size():
     def align_mamba():
         return new_mamba_spec(mamba_cache_mode="align")
 
-    groups = kv_cache_utils.get_kv_cache_groups(
-        vllm_config, _glm5_like_kv_cache_spec_with_tail(align_mamba)
-    )
+    groups = _glm5_groups(vllm_config, _glm5_like_kv_cache_spec_with_tail(align_mamba))
     kv_cache_config = KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
@@ -2709,7 +2785,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible():
     assert big_mamba_spec().page_size_bytes > mla_page
 
     with pytest.raises(ValueError, match="does not fit the MLA page"):
-        kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+        _glm5_groups(vllm_config, kv_cache_spec)
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible_no_indexer():
@@ -2735,7 +2811,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible_no_indexer():
     assert kv_cache_spec["layers.0.linear_attn"].page_size_bytes > mla_page
 
     with pytest.raises(NotImplementedError, match="page size"):
-        kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+        _glm5_groups(vllm_config, kv_cache_spec)
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
@@ -2751,7 +2827,8 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     assert prepadded_mamba_spec().page_size_bytes < mla_page
 
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = _glm5_groups(vllm_config, kv_cache_spec)
+    pool_plan = _glm5_pool_plan(vllm_config, groups)
     mamba_groups = [
         group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)
     ]
@@ -2760,9 +2837,12 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
     for group in mamba_groups:
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups, pool_plan)
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        vllm_config, groups, bytes_per_block * 100 + 1
+        vllm_config,
+        groups,
+        bytes_per_block * 100 + 1,
+        pool_plan=pool_plan,
     )
     assert kv_cache_config.num_blocks == 100
     assert len(kv_cache_config.kv_cache_tensors) == 56
@@ -2776,7 +2856,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     vllm_config = VllmConfig(model_config=model_config)
 
     kv_cache_spec, _ = _glm5_like_kv_cache_spec()
-    global_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    global_groups = _glm5_groups(vllm_config, kv_cache_spec)
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
 
@@ -2792,11 +2872,15 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     ]
     assert [len(group.layer_names) for group in mamba_groups] == [5, 5, 4, 4]
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    pool_plan = _glm5_pool_plan(vllm_config, groups)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups, pool_plan)
     assert bytes_per_block == 5 * mla_page + 5 * idx_page
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        vllm_config, groups, bytes_per_block * 100 + 1
+        vllm_config,
+        groups,
+        bytes_per_block * 100 + 1,
+        pool_plan=pool_plan,
     )
     assert kv_cache_config.num_blocks == 100
     tensors = _tensor_by_layer(kv_cache_config)
@@ -2809,6 +2893,18 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     assert tensors["layers.19.attn"].offset == tensors["layers.21.linear_attn"].offset
     assert tensors["layers.19.attn"].offset == tensors["layers.22.linear_attn"].offset
     assert {t.size for t in kv_cache_config.kv_cache_tensors} == {bytes_per_block * 100}
+
+
+@pytest.mark.parametrize("fallback", ["disable_hybrid", "hisparse"])
+def test_glm5_plan_preserves_generic_grouping_precedence(fallback):
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    if fallback == "disable_hybrid":
+        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    else:
+        vllm_config.attention_config.hisparse_config = object()
+
+    kv_cache_spec, _ = _glm5_like_kv_cache_spec()
+    assert _glm5_provider().get_kv_cache_groups(vllm_config, kv_cache_spec) is None
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(monkeypatch):
@@ -2826,7 +2922,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(monkeypatc
     )
 
     kv_cache_spec, mamba_layers = _glm5_like_kv_cache_spec()
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = _glm5_groups(vllm_config, kv_cache_spec)
     mamba_groups = [g for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
     assert [len(g.layer_names) for g in mamba_groups] == [7, 7, 7, 7, 6]
     for k, name in enumerate(mamba_layers):
@@ -2842,7 +2938,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(monkeypatc
         projected = kv_cache_utils._project_kv_cache_groups_to_worker(
             groups, worker_spec
         )
-        assert kv_cache_utils._glm5_next_tensor_layout(projected) is not None
+        assert _glm5_pool_plan(vllm_config, projected) is not None
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_pp_starved_stage(monkeypatch):
@@ -2858,7 +2954,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_starved_stage(monkeypatch):
 
     kv_cache_spec, _ = _glm5_like_kv_cache_spec()
     with pytest.raises(ValueError, match="VLLM_PP_LAYER_PARTITION"):
-        kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+        _glm5_groups(vllm_config, kv_cache_spec)
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag():
@@ -2876,15 +2972,19 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag():
     )
 
     kv_cache_spec, _ = _glm5_like_kv_cache_spec()
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = _glm5_groups(vllm_config, kv_cache_spec)
+    pool_plan = _glm5_pool_plan(vllm_config, groups)
 
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups, pool_plan)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        vllm_config, groups, bytes_per_block * 100 + 1
+        vllm_config,
+        groups,
+        bytes_per_block * 100 + 1,
+        pool_plan=pool_plan,
     )
     assert kv_cache_config.num_blocks == 100
     assert len(kv_cache_config.kv_cache_tensors) == 56
@@ -2915,7 +3015,8 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
             kv_cache_spec[f"layers.{i}.linear_attn"] = new_mamba_spec()
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
 
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = _glm5_groups(vllm_config, kv_cache_spec)
+    pool_plan = _glm5_pool_plan(vllm_config, groups)
     mamba_groups = [
         group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)
     ]
@@ -2924,11 +3025,14 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
     for group in mamba_groups:
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups, pool_plan)
     assert bytes_per_block == 7 * mla_page
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        vllm_config, groups, bytes_per_block * 100 + 1
+        vllm_config,
+        groups,
+        bytes_per_block * 100 + 1,
+        pool_plan=pool_plan,
     )
     assert kv_cache_config.num_blocks == 100
     # Each group has one tensor descriptor and all groups alias the same slots.
@@ -2977,10 +3081,14 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
         else:
             kv_cache_spec[f"layers.{i}.linear_attn"] = new_mamba_spec()
 
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    groups = _glm5_groups(vllm_config, kv_cache_spec)
+    pool_plan = _glm5_pool_plan(vllm_config, groups)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups, pool_plan)
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        vllm_config, groups, bytes_per_block * 100 + 1
+        vllm_config,
+        groups,
+        bytes_per_block * 100 + 1,
+        pool_plan=pool_plan,
     )
 
     scheduler_config = generate_scheduler_kv_cache_config([kv_cache_config])

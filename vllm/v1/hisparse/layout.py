@@ -304,6 +304,8 @@ def get_hisparse_kv_cache_config(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
     host_budget: int,
+    *,
+    fixed_num_blocks: int | None = None,
 ) -> KVCacheConfig:
     from vllm.v1.core.kv_cache_utils import (
         _get_kv_cache_bytes_per_block,
@@ -316,8 +318,10 @@ def get_hisparse_kv_cache_config(
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(device_groups)
-    num_blocks = may_override_num_blocks(
-        vllm_config, available_memory // bytes_per_block
+    num_blocks = (
+        fixed_num_blocks
+        if fixed_num_blocks is not None
+        else may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
     )
     size = bytes_per_block * num_blocks
     kv_cache_tensors = _build_hisparse_kv_cache_tensors(
