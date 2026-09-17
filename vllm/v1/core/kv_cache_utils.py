@@ -1197,10 +1197,11 @@ def resolve_kv_cache_planning_hooks(
         return platform_hooks
 
     model_cls: type[Any] | None = None
-    if isinstance(vllm_config.model_config, ModelConfig):
+    model_config = getattr(vllm_config, "model_config", None)
+    if isinstance(model_config, ModelConfig):
         from vllm.model_executor.model_loader.utils import get_model_cls
 
-        model_cls = get_model_cls(vllm_config.model_config)
+        model_cls = get_model_cls(model_config)
 
     matches = (
         registration
