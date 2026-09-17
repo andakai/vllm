@@ -116,6 +116,57 @@ def _patch_module(monkeypatch) -> None:
     )
 
 
+def test_minimal_kv_cache_profiling_reuses_resolved_hooks(monkeypatch):
+    from vllm.v1.core import kv_cache_utils
+
+    specs = {"layer": object()}
+    groups = [object()]
+    hooks = kv_cache_utils.KVCachePlanningHooks()
+    planned_config = SimpleNamespace(num_blocks=3)
+    calls = []
+
+    def get_groups(config, spec, *, _hooks):
+        calls.append(("groups", _hooks))
+        return groups
+
+    def get_config(config, group_arg, available_memory, *, _hooks):
+        calls.append(("config", _hooks))
+        return planned_config
+
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "resolve_kv_cache_planning_hooks",
+        lambda _: hooks,
+    )
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "get_kv_cache_groups",
+        get_groups,
+    )
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "get_kv_cache_config_from_groups",
+        get_config,
+    )
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        get_kv_cache_spec=lambda: specs,
+        max_num_reqs=8,
+        compilation_config=SimpleNamespace(max_cudagraph_capture_size=4),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            num_gpu_blocks=None,
+        ),
+        initialize_kv_cache=lambda *_args, **_kwargs: None,
+    )
+
+    cgu._init_minimal_kv_cache_for_profiling(runner)
+
+    assert calls == [("groups", hooks), ("config", hooks)]
+    assert runner.cache_config.num_gpu_blocks == 3
+    assert runner.cache_config.num_gpu_blocks_override is None
+
+
 def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.NONE)

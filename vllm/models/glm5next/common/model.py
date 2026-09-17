@@ -79,10 +79,12 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.glm5next_kv_cache import GLM5_NEXT_KV_CACHE_HOOKS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.v1.core.kv_cache_utils import register_kv_cache_planning_hooks
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -1160,6 +1162,23 @@ class Glm5NextForConditionalGeneration(
         config = super().get_encoder_cudagraph_config()
         config.buffer_keys = [k for k in config.buffer_keys if k != "pos_embeds"]
         return config
+
+
+def _matches_glm5_next_kv_cache_hooks(
+    vllm_config: VllmConfig, model_cls: type | None
+) -> bool:
+    del vllm_config
+    return model_cls in (
+        Glm5NextForCausalLM,
+        Glm5NextForConditionalGeneration,
+    )
+
+
+register_kv_cache_planning_hooks(
+    "glm5next",
+    _matches_glm5_next_kv_cache_hooks,
+    GLM5_NEXT_KV_CACHE_HOOKS,
+)
 
 
 def get_spec_layer_idx_from_weight_name(

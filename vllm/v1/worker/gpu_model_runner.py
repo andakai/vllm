@@ -6539,11 +6539,15 @@ class GPUModelRunner(
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
             get_kv_cache_groups,
+            resolve_kv_cache_planning_hooks,
         )
 
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        hooks = resolve_kv_cache_planning_hooks(self.vllm_config)
+        kv_cache_groups = get_kv_cache_groups(
+            self.vllm_config, kv_cache_spec, _hooks=hooks
+        )
         # the minimum number of blocks required is 1 block *per sequence*
         min_blocks = (
             min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
@@ -6554,7 +6558,10 @@ class GPUModelRunner(
         saved_override = self.cache_config.num_gpu_blocks_override
         self.cache_config.num_gpu_blocks_override = min_blocks
         minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0
+            self.vllm_config,
+            kv_cache_groups,
+            available_memory=0,
+            _hooks=hooks,
         )
         self.cache_config.num_gpu_blocks_override = saved_override
 
