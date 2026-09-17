@@ -39,7 +39,10 @@ def test_new_backend_starts_in_running_state():
 
 
 @pytest.mark.parametrize("enable_nccl_comm_suspend", [True, False])
-def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_suspend):
+@pytest.mark.parametrize("level,tags", [(1, None), (2, ("kv_cache",))])
+def test_worker_drives_communicator_suspension(
+    monkeypatch, enable_nccl_comm_suspend, level, tags
+):
     """Comm walkers run around sleep/wake only when explicitly enabled."""
     from types import SimpleNamespace
 
@@ -48,8 +51,8 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     calls: list[tuple[str, object]] = []
 
     class Backend:
-        def suspend(self, level: int = 1) -> None:
-            calls.append(("backend.suspend", level))
+        def suspend(self, level: int = 1, tags: tuple[str, ...] | None = None) -> None:
+            calls.append(("backend.suspend", (level, tags)))
 
         def resume(self, tags: list[str] | None = None) -> None:
             calls.append(("backend.resume", tuple(tags) if tags else None))
@@ -73,11 +76,12 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
         lambda: calls.append(("comms.resume", None)),
     )
 
-    worker.sleep(level=1)
+    # KV-only level 2 must not read model buffers: this worker has no model.
+    worker.sleep(level=level, tags=tags)
     worker.wake_up(tags=["weights"])
 
     expected = [
-        ("backend.suspend", 1),
+        ("backend.suspend", (level, tags)),
         ("comms.suspend", None),
         ("backend.resume", ("weights",)),
         ("comms.resume", None),
@@ -130,7 +134,7 @@ def test_suspend_resume_state_transitions():
 class DummyBackend(SleepModeBackend):
     """A no-GPU backend used to exercise lifecycle + registration in CPU tests."""
 
-    def suspend(self, level: int = 1) -> None:
+    def suspend(self, level: int = 1, tags: tuple[str, ...] | None = None) -> None:
         self._state = "SUSPENDED"
 
     def resume(self, tags: list[str] | None = None) -> None:

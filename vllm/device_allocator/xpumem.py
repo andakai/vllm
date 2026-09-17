@@ -165,7 +165,12 @@ class XpuMemAllocator:
         logger.debug("Freed %s bytes for %s at %s", data.handle[1], data.tag, ptr)
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        *,
+        tags: tuple[str, ...] | None = None,
+    ) -> None:
         if offload_tags is None:
             offload_tags = (XpuMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
@@ -178,6 +183,8 @@ class XpuMemAllocator:
         has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
+            if tags is not None and data.tag not in tags:
+                continue
             if data.is_asleep:
                 requests_offload = data.tag in offload_tags
                 was_offloaded = data.cpu_backup_tensor is not None

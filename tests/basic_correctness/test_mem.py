@@ -109,6 +109,33 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
+@pytest.mark.parametrize("offload", [False, True], ids=["discard", "offload"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_sleep_selected_tags_preserves_other_pools(offload):
+    """Tag selection is independent of offload policy, including an empty selection."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("selected"):
+        selected = torch.ones(1024, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("resident"):
+        resident = torch.full((1024,), 7.0, device=DEVICE_TYPE)
+    mapped_before = mapped_usage(allocator)
+
+    allocator.sleep(offload_tags=(), tags=())
+    assert mapped_usage(allocator) == mapped_before
+    torch.testing.assert_close(selected, torch.ones_like(selected))
+    torch.testing.assert_close(resident, torch.full_like(resident, 7.0))
+
+    allocator.sleep(offload_tags=("selected",) if offload else (), tags=("selected",))
+    assert 0 < mapped_usage(allocator) < mapped_before
+    torch.testing.assert_close(resident, torch.full_like(resident, 7.0))
+
+    allocator.wake_up(tags=["selected"])
+    assert mapped_usage(allocator) == mapped_before
+    if offload:
+        torch.testing.assert_close(selected, torch.ones_like(selected))
+    torch.testing.assert_close(resident, torch.full_like(resident, 7.0))
+
+
 @pytest.mark.parametrize("full_sleep", [0, 1, 2], ids=["kv-only", "sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):

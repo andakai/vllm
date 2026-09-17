@@ -349,11 +349,8 @@ class Executor(ABC):
         if not remaining:
             logger.warning("Executor is already sleeping.")
             return
-        if "weights" not in remaining:
-            self.discard(tuple(remaining))
-            return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.collective_rpc("sleep", kwargs=dict(level=level, tags=tuple(remaining)))
         time_after_sleep = time.perf_counter()
         self.sleeping_tags |= remaining
         logger.info(

@@ -224,14 +224,20 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        *,
+        tags: tuple[str, ...] | None = None,
+    ) -> None:
         """Put the allocator in sleep mode.
-        All data in the memory allocation with the specified tag will be
-        offloaded to CPU memory, and others will be discarded.
+        Selected allocations are offloaded or discarded according to offload_tags.
 
         Args:
             offload_tags: The tags of the memory allocation that will be
-                offloaded. The rest of the memory allocation will be discarded.
+                offloaded. Other selected allocations will be discarded.
+            tags: Memory-pool tags to suspend. None selects all allocations;
+                an empty tuple selects none. Unselected allocations are unchanged.
 
         """
         if offload_tags is None:
@@ -248,6 +254,8 @@ class CuMemAllocator:
         has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
+            if tags is not None and data.tag not in tags:
+                continue
             if data.is_asleep:
                 requests_offload = data.tag in offload_tags
                 was_offloaded = data.cpu_backup_tensor is not None
