@@ -2514,7 +2514,105 @@ def _layer_offset(tensor: KVCacheTensor, layer_name: str) -> int:
     return tensor.offset + tensor.layers.index(layer_name) * tensor.layer_stride
 
 
-def test_get_kv_cache_config_balanced_mamba_hybrid():
+def test_kv_cache_policy_resolver_precedence_and_config_isolation(monkeypatch):
+    from vllm.model_executor.model_loader import utils as model_loader_utils
+
+    class ModelPolicy(kv_cache_utils.KVCachePlanningPolicy):
+        pass
+
+    class PlatformPolicy(kv_cache_utils.KVCachePlanningPolicy):
+        pass
+
+    model_cls = SimpleNamespace(kv_cache_planning_policy=ModelPolicy)
+    monkeypatch.setattr(model_loader_utils, "get_model_cls", lambda _: model_cls)
+    monkeypatch.setattr(
+        kv_cache_utils.current_platform,
+        "get_kv_cache_planning_policy",
+        lambda _: None,
+    )
+
+    model_config = object.__new__(ModelConfig)
+    config_a = SimpleNamespace(model_config=model_config, marker="a")
+    config_b = SimpleNamespace(model_config=model_config, marker="b")
+    policy_a = kv_cache_utils.resolve_kv_cache_planning_policy(config_a)
+    policy_b = kv_cache_utils.resolve_kv_cache_planning_policy(config_b)
+    assert isinstance(policy_a, ModelPolicy)
+    assert isinstance(policy_b, ModelPolicy)
+    assert policy_a is not policy_b
+    assert policy_a.vllm_config is config_a
+    assert policy_b.vllm_config is config_b
+
+    monkeypatch.setattr(
+        kv_cache_utils.current_platform,
+        "get_kv_cache_planning_policy",
+        lambda _: PlatformPolicy,
+    )
+    monkeypatch.setattr(
+        model_loader_utils,
+        "get_model_cls",
+        lambda _: pytest.fail("model policy resolved despite platform override"),
+    )
+    assert isinstance(
+        kv_cache_utils.resolve_kv_cache_planning_policy(config_a), PlatformPolicy
+    )
+
+    default_config = SimpleNamespace(model_config=SimpleNamespace())
+    monkeypatch.setattr(
+        kv_cache_utils.current_platform,
+        "get_kv_cache_planning_policy",
+        lambda _: None,
+    )
+    assert type(kv_cache_utils.resolve_kv_cache_planning_policy(default_config)) is (
+        kv_cache_utils.KVCachePlanningPolicy
+    )
+
+
+def test_kv_cache_planner_keeps_common_grouping_precedence(monkeypatch):
+    events = []
+
+    class Policy(kv_cache_utils.KVCachePlanningPolicy):
+        def get_kv_cache_groups(self, kv_cache_spec):
+            events.append("policy")
+            return []
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "unify_hybrid_kv_cache_specs",
+        lambda _: events.append("disable-hybrid"),
+    )
+    planner = kv_cache_utils.KVCachePlanner(config, Policy(config))
+    assert planner.get_kv_cache_groups({"layer": object()}) == []
+    assert events == ["disable-hybrid", "policy"]
+
+    hisparse_groups = [object()]
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.attention_config.hisparse_config = object()
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "get_hisparse_kv_cache_groups",
+        lambda *_: hisparse_groups,
+    )
+    assert planner.get_kv_cache_groups({"layer": object()}) is hisparse_groups
+    assert events == ["disable-hybrid", "policy"]
+
+
+@pytest.fixture
+def glm5_policy(monkeypatch):
+    from vllm.models.glm5next_kv_cache import Glm5NextKVCachePlanningPolicy
+
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "resolve_kv_cache_planning_policy",
+        Glm5NextKVCachePlanningPolicy,
+    )
+    return Glm5NextKVCachePlanningPolicy
+
+
+def test_get_kv_cache_config_balanced_mamba_hybrid(glm5_policy):
     """Hybrid slot sharing: mamba layers co-own the MLA slot tensors."""
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
@@ -2547,7 +2645,9 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
         assert group.kv_cache_spec.page_size_padded == mla_page
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils.get_kv_cache_planner(
+        vllm_config
+    ).get_kv_cache_bytes_per_block(groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     # Every block id is charged the full per-block sum.
@@ -2589,7 +2689,7 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
     ) == pytest.approx(100 / blocks_per_request)
 
 
-def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
+def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor(glm5_policy):
     """The kpool tail parasitizes the indexer tensors instead of getting its
     own: sibling idx/tail tensors paired by layer order, zero standalone tail
     bytes, one shared block per request, and no prefix-caching leakage from
@@ -2621,7 +2721,9 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     )
     assert tail_inner.page_size_padded == idx_page
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils.get_kv_cache_planner(
+        vllm_config
+    ).get_kv_cache_bytes_per_block(groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
@@ -2640,7 +2742,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
 
     # The layout detector surfaces the sibling names in layer order for the
     # accounting and connector paths.
-    layout = kv_cache_utils._glm5_next_tensor_layout(kv_cache_config.kv_cache_groups)
+    layout = glm5_policy(vllm_config)._get_layout(kv_cache_config.kv_cache_groups)
     assert layout is not None
     assert layout[3] == [f"layers.{4 * i + 3}.indexer" for i in range(11)]
     assert layout[6] == [f"layers.{4 * i + 3}.tail" for i in range(11)]
@@ -2662,7 +2764,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     )
 
 
-def test_glm5_kpool_tail_does_not_drag_hash_block_size():
+def test_glm5_kpool_tail_does_not_drag_hash_block_size(glm5_policy):
     """The tail's kpool-sized scratch block (4 tokens) must not constrain the
     prefix-cache hash granularity: participating groups alone decide it."""
     model_config = ModelConfig(max_model_len=8192)
@@ -2695,7 +2797,7 @@ def test_glm5_kpool_tail_does_not_drag_hash_block_size():
     ) == (1024, 16)
 
 
-def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible():
+def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible(glm5_policy):
     """Reject GLM-5.3-Flash layouts whose Mamba page exceeds the MLA page."""
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
@@ -2738,7 +2840,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible_no_indexer():
         kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
-def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
+def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba(glm5_policy):
     """Platform-prepadded mamba pages (mamba_page_size_padded hint) must not
     disable slot sharing; the layout re-pads them to the MLA page."""
     model_config = ModelConfig(max_model_len=8192)
@@ -2760,7 +2862,9 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
     for group in mamba_groups:
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils.get_kv_cache_planner(
+        vllm_config
+    ).get_kv_cache_bytes_per_block(groups)
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
         vllm_config, groups, bytes_per_block * 100 + 1
     )
@@ -2768,7 +2872,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
     assert len(kv_cache_config.kv_cache_tensors) == 56
 
 
-def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
+def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection(glm5_policy):
     """Round-robin mamba grouping keeps practical PP splits balanced: every
     stage's largest projected mamba group slice fits its projected MLA
     layers, so per-stage slot tensors all have an MLA owner."""
@@ -2792,7 +2896,9 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     ]
     assert [len(group.layer_names) for group in mamba_groups] == [5, 5, 4, 4]
 
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils.get_kv_cache_planner(
+        vllm_config
+    ).get_kv_cache_bytes_per_block(groups)
     assert bytes_per_block == 5 * mla_page + 5 * idx_page
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
@@ -2811,7 +2917,9 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     assert {t.size for t in kv_cache_config.kv_cache_tensors} == {bytes_per_block * 100}
 
 
-def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(monkeypatch):
+def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(
+    monkeypatch, glm5_policy
+):
     """PP=4's default partition [11,11,12,11] leaves stage 0 with 2 MLA
     layers but a round-robin slice of 3 under the minimum 4 mamba groups;
     grouping bumps to 5 groups so every stage's projection keeps sharing
@@ -2842,10 +2950,12 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(monkeypatc
         projected = kv_cache_utils._project_kv_cache_groups_to_worker(
             groups, worker_spec
         )
-        assert kv_cache_utils._glm5_next_tensor_layout(projected) is not None
+        assert glm5_policy(vllm_config)._get_layout(projected) is not None
 
 
-def test_get_kv_cache_config_mamba_hybrid_sharing_pp_starved_stage(monkeypatch):
+def test_get_kv_cache_config_mamba_hybrid_sharing_pp_starved_stage(
+    monkeypatch, glm5_policy
+):
     """Reject PP stages whose Mamba layers have no MLA slot to share."""
     from vllm.config import ParallelConfig
 
@@ -2861,7 +2971,9 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_starved_stage(monkeypatch):
         kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
-def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag():
+def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag(
+    glm5_policy,
+):
     """Hybrid slot sharing must take precedence over the experimental
     enable_cross_layers_blocks packed layout: generic packing would give the
     MLA slots a strided view, breaking the contiguous virtual split."""
@@ -2880,7 +2992,9 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag():
 
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils.get_kv_cache_planner(
+        vllm_config
+    ).get_kv_cache_bytes_per_block(groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
@@ -2944,7 +3058,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
     assert {t.size for t in kv_cache_config.kv_cache_tensors} == {bytes_per_block * 100}
 
 
-def test_get_kv_cache_capacity_after_scheduler_unwrap():
+def test_get_kv_cache_capacity_after_scheduler_unwrap(glm5_policy):
     """max_concurrency must survive the scheduler-config unwrap.
 
     Regression for the balanced-mamba hybrid layout:
@@ -2978,7 +3092,9 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
             kv_cache_spec[f"layers.{i}.linear_attn"] = new_mamba_spec()
 
     groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    bytes_per_block = kv_cache_utils.get_kv_cache_planner(
+        vllm_config
+    ).get_kv_cache_bytes_per_block(groups)
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
         vllm_config, groups, bytes_per_block * 100 + 1
     )

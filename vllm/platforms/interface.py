@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.core.kv_cache_utils import KVCachePlanningPolicy
 else:
     FlexibleArgumentParser = object
 
@@ -246,6 +247,13 @@ class Platform:
     def get_compile_backend(cls) -> str:
         """Get the custom compile backend for current platform."""
         return cls.simple_compile_backend
+
+    @classmethod
+    def get_kv_cache_planning_policy(
+        cls, vllm_config: "VllmConfig"
+    ) -> type["KVCachePlanningPolicy"] | None:
+        """Return a platform-specific KV cache planning policy, if any."""
+        return None
 
     @classmethod
     def import_ir_kernels(cls) -> None:

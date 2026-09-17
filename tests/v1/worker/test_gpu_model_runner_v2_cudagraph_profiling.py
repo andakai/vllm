@@ -116,6 +116,47 @@ def _patch_module(monkeypatch) -> None:
     )
 
 
+def test_minimal_kv_cache_profiling_uses_resolved_planner(monkeypatch):
+    from vllm.v1.core import kv_cache_utils
+
+    specs = {"layer": object()}
+    planned_config = SimpleNamespace(num_blocks=3)
+    calls = []
+
+    class Planner:
+        def plan(self, kv_cache_spec, available_memory):
+            calls.append((kv_cache_spec, available_memory))
+            return planned_config
+
+    vllm_config = SimpleNamespace()
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "get_kv_cache_planner",
+        lambda config: Planner() if config is vllm_config else None,
+    )
+    initialized = []
+    runner = SimpleNamespace(
+        vllm_config=vllm_config,
+        get_kv_cache_spec=lambda: specs,
+        max_num_reqs=8,
+        compilation_config=SimpleNamespace(max_cudagraph_capture_size=4),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            num_gpu_blocks=None,
+        ),
+        initialize_kv_cache=lambda config, is_profiling: initialized.append(
+            (config, is_profiling)
+        ),
+    )
+
+    cgu._init_minimal_kv_cache_for_profiling(runner)
+
+    assert calls == [(specs, 0)]
+    assert initialized == [(planned_config, True)]
+    assert runner.cache_config.num_gpu_blocks == 3
+    assert runner.cache_config.num_gpu_blocks_override is None
+
+
 def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.NONE)
