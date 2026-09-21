@@ -6479,7 +6479,9 @@ class GPUModelRunner(
         gc.collect()
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
-        from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
+        from vllm.v1.core.kv_cache_config_builder import (
+            _get_profiling_kv_cache_config,
+        )
 
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
@@ -6488,7 +6490,7 @@ class GPUModelRunner(
             min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
             or 1
         )
-        minimal_config = KVCacheConfigBuilder.get_profiling_kv_cache_config(
+        minimal_config = _get_profiling_kv_cache_config(
             self.vllm_config, kv_cache_spec, min_blocks
         )
 

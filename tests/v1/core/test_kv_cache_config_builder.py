@@ -7,8 +7,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm.platforms import Platform
-from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
+from vllm.v1.core.kv_cache_config_builder import (
+    KVCacheConfigBuilder,
+    _get_profiling_kv_cache_config,
+)
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 def _make_vllm_config(builder_cls_path: str | None = None) -> MagicMock:
@@ -28,13 +32,32 @@ class CustomBuilder(DefaultKVCacheConfigBuilder):
     pass
 
 
+class ExactBlocksBuilder(DefaultKVCacheConfigBuilder):
+    """Record the capacity passed through the profiling path."""
+
+    seen_num_blocks: int | None = None
+
+    def get_kv_cache_groups(self, vllm_config, kv_cache_spec):
+        return []
+
+    def get_kv_cache_config_from_groups(self, vllm_config, kv_cache_groups, num_blocks):
+        type(self).seen_num_blocks = num_blocks
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=kv_cache_groups,
+        )
+
+
 @pytest.fixture(autouse=True)
 def _reset_active_builder():
     # Clear the cached builder directly; the cache attribute is private on
     # purpose, so tests poke it instead of shipping a reset() production API.
     KVCacheConfigBuilder._active = None
+    ExactBlocksBuilder.seen_num_blocks = None
     yield
     KVCacheConfigBuilder._active = None
+    ExactBlocksBuilder.seen_num_blocks = None
 
 
 class TestPlatformHookResolution:
@@ -85,14 +108,29 @@ class TestBuilderResolution:
         KVCacheConfigBuilder._resolve(cfg)
         active = KVCacheConfigBuilder._active
         assert isinstance(active, CustomBuilder)
-        with (
-            patch.object(active, "get_kv_cache_configs", return_value=[]) as g,
-            patch.object(active, "get_kv_cache_groups", return_value=[]) as h,
-        ):
+        with patch.object(active, "get_kv_cache_configs", return_value=[]) as g:
             assert KVCacheConfigBuilder.get_kv_cache_configs(cfg, [], [0]) == []
             g.assert_called_once()
-            assert KVCacheConfigBuilder.get_kv_cache_groups(cfg, {}) == []
-            h.assert_called_once()
+
+    def test_facade_only_exposes_core_entry_point(self):
+        assert not hasattr(KVCacheConfigBuilder, "get_profiling_kv_cache_config")
+        assert not hasattr(KVCacheConfigBuilder, "get_kv_cache_groups")
+        assert not hasattr(KVCacheConfigBuilder, "get_pool_bytes_per_block")
+        assert not hasattr(KVCacheConfigBuilder, "get_kv_cache_config_from_groups")
+
+    @patch("vllm.platforms.current_platform")
+    def test_profiling_reuses_exact_block_materializer(self, mock_platform):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = (
+            "tests.v1.core.test_kv_cache_config_builder.ExactBlocksBuilder"
+        )
+        cfg = _make_vllm_config()
+        cfg.cache_config.num_gpu_blocks_override = 11
+
+        result = _get_profiling_kv_cache_config(cfg, {}, min_blocks=7)
+
+        assert result.num_blocks == 7
+        assert ExactBlocksBuilder.seen_num_blocks == 7
+        assert cfg.cache_config.num_gpu_blocks_override == 11
 
 
 class TestPlatformCustomPriority:
@@ -126,30 +164,6 @@ class TestDefaultBuilderDelegation:
     implements the planning steps in :mod:`kv_cache_planning`."""
 
     @patch("vllm.platforms.current_platform")
-    @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_groups")
-    def test_get_kv_cache_groups_delegates_to_default(self, mock_impl, mock_platform):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
-        cfg = _make_vllm_config()
-        spec = {"layer": MagicMock()}
-        assert (
-            KVCacheConfigBuilder.get_kv_cache_groups(cfg, spec)
-            is mock_impl.return_value
-        )
-        mock_impl.assert_called_once_with(cfg, spec)
-
-    @patch("vllm.platforms.current_platform")
-    @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_config_from_groups")
-    def test_get_kv_cache_config_from_groups_delegates_to_default(
-        self, mock_impl, mock_platform
-    ):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
-        cfg = _make_vllm_config()
-        groups = [MagicMock()]
-        result = KVCacheConfigBuilder.get_kv_cache_config_from_groups(cfg, groups, 0)
-        assert result is mock_impl.return_value
-        mock_impl.assert_called_once_with(cfg, groups, 0)
-
-    @patch("vllm.platforms.current_platform")
     @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_configs")
     def test_get_kv_cache_configs_delegates_to_default(self, mock_impl, mock_platform):
         mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
@@ -158,68 +172,3 @@ class TestDefaultBuilderDelegation:
         result = KVCacheConfigBuilder.get_kv_cache_configs(cfg, specs, memory)
         assert result is mock_impl.return_value
         mock_impl.assert_called_once_with(cfg, specs, memory)
-
-    @patch("vllm.platforms.current_platform")
-    @patch.object(DefaultKVCacheConfigBuilder, "get_profiling_kv_cache_config")
-    def test_get_profiling_kv_cache_config_delegates_to_default(
-        self, mock_impl, mock_platform
-    ):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
-        cfg = _make_vllm_config()
-        spec = {"layer": MagicMock()}
-        result = KVCacheConfigBuilder.get_profiling_kv_cache_config(cfg, spec, 4)
-        assert result is mock_impl.return_value
-        mock_impl.assert_called_once_with(cfg, spec, 4)
-
-    @patch("vllm.platforms.current_platform")
-    @patch.object(DefaultKVCacheConfigBuilder, "check_enough_kv_cache_memory")
-    def test_check_enough_kv_cache_memory_delegates_to_default(
-        self, mock_impl, mock_platform
-    ):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
-        cfg = _make_vllm_config()
-        spec = {"layer": MagicMock()}
-        result = KVCacheConfigBuilder.check_enough_kv_cache_memory(cfg, spec, 0)
-        assert result is mock_impl.return_value
-        mock_impl.assert_called_once_with(cfg, spec, 0)
-
-    @patch("vllm.platforms.current_platform")
-    @patch.object(DefaultKVCacheConfigBuilder, "get_pool_bytes_per_block")
-    def test_get_pool_bytes_per_block_delegates_to_default(
-        self, mock_impl, mock_platform
-    ):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
-        cfg = _make_vllm_config()
-        groups = [MagicMock()]
-        assert (
-            KVCacheConfigBuilder.get_pool_bytes_per_block(groups, cfg)
-            is mock_impl.return_value
-        )
-        mock_impl.assert_called_once_with(groups)
-
-    @patch("vllm.platforms.current_platform")
-    @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_bytes_per_block")
-    def test_get_kv_cache_bytes_per_block_delegates_to_default(
-        self, mock_impl, mock_platform
-    ):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
-        cfg = _make_vllm_config()
-        groups = [MagicMock()]
-        assert (
-            KVCacheConfigBuilder.get_kv_cache_bytes_per_block(groups, cfg)
-            is mock_impl.return_value
-        )
-        mock_impl.assert_called_once_with(groups)
-
-    @patch("vllm.platforms.current_platform")
-    @patch.object(DefaultKVCacheConfigBuilder, "validate_kv_cache_config")
-    def test_validate_kv_cache_config_delegates_to_default(
-        self, mock_impl, mock_platform
-    ):
-        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
-        cfg = _make_vllm_config()
-        groups = [MagicMock()]
-        layout = MagicMock()
-        result = KVCacheConfigBuilder.validate_kv_cache_config(layout, groups, cfg)
-        assert result is mock_impl.return_value
-        mock_impl.assert_called_once_with(layout, groups)

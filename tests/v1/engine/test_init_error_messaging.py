@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -11,10 +12,8 @@ default_builder = DefaultKVCacheConfigBuilder()
 
 
 def test_kv_cache_oom_no_memory():
-    from unittest.mock import MagicMock
-
-    config = MagicMock()
-    config.model_config.max_model_len = 2048
+    config = VllmConfig(model_config=ModelConfig(max_model_len=2048))
+    config.cache_config.kv_cache_layout = "LBNHC"
 
     spec = {
         "layer_0": FullAttentionSpec(
@@ -26,22 +25,17 @@ def test_kv_cache_oom_no_memory():
     }
 
     with pytest.raises(ValueError):
-        default_builder.check_enough_kv_cache_memory(config, spec, 0)
+        default_builder.get_kv_cache_configs(config, [spec], [0])
 
 
 def test_kv_cache_oom_insufficient_memory(monkeypatch):
-    from unittest.mock import MagicMock
-
-    config = MagicMock()
-    config.model_config.max_model_len = 2048
-    config.cache_config.block_size = 16
-    config.parallel_config.tensor_parallel_size = 1
-    config.parallel_config.pipeline_parallel_size = 1
-    config.parallel_config.decode_context_parallel_size = 1
+    config = VllmConfig(model_config=ModelConfig(max_model_len=2048))
+    config.cache_config.kv_cache_layout = "LBNHC"
 
     monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_planning._max_memory_usage_bytes",
-        lambda c, s: 100 * 1024**3,  # 100 GiB
+        default_builder,
+        "_get_max_memory_usage_bytes_from_groups",
+        lambda c, g: 100 * 1024**3,  # 100 GiB
     )
 
     spec = {
@@ -54,4 +48,4 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
     }
 
     with pytest.raises(ValueError):
-        default_builder.check_enough_kv_cache_memory(config, spec, 1024**3)  # 1 GiB
+        default_builder.get_kv_cache_configs(config, [spec], [1024**3])
