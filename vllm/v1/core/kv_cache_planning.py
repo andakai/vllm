@@ -1353,7 +1353,7 @@ class DefaultKVCacheConfigBuilder:
         hisparse_layout = create_hisparse_layout(
             vllm_config, kv_cache_groups, host_budget
         )
-        return _get_kv_cache_bytes_per_block(hisparse_layout.device_groups)
+        return self.get_pool_bytes_per_block(hisparse_layout.device_groups)
 
     def _estimate_max_model_len_from_groups(
         self,

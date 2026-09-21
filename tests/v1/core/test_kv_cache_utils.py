@@ -156,6 +156,20 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
+
+    class PaddedPoolBuilder(DefaultKVCacheConfigBuilder):
+        def get_pool_bytes_per_block(self, kv_cache_groups):
+            return super().get_pool_bytes_per_block(kv_cache_groups) + 4096
+
+    hisparse_layout = create_hisparse_layout(config, [group], 2**30)
+    expected_pool_bytes = (
+        default_builder.get_pool_bytes_per_block(hisparse_layout.device_groups) + 4096
+    )
+    assert (
+        PaddedPoolBuilder()._get_pool_bytes_per_block_for_config(config, [group])
+        == expected_pool_bytes
+    )
+
     cache_config = default_builder.get_kv_cache_config_from_groups(
         config, [group], num_blocks=7
     )
