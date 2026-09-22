@@ -83,6 +83,24 @@ def test_workspace_lanes_compose_with_ubatches(monkeypatch) -> None:
     assert len(pointers) == 4
 
 
+@pytest.mark.skip_global_cleanup
+def test_reserve_simultaneous_covers_each_ubatch_in_current_lane() -> None:
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+
+    with workspace.use_workspace_lane(1):
+        manager.reserve_simultaneous(
+            ((3,), torch.uint8),
+            ((1,), torch.float32),
+        )
+
+    assert manager._current_workspaces[0] is None
+    assert manager._current_workspaces[2] is None
+    assert manager._current_workspaces[1].numel() == 512  # type: ignore[union-attr]
+    assert manager._current_workspaces[3].numel() == 512  # type: ignore[union-attr]
+
+
 def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
     """Once locked, oversized requests fail loudly instead of reallocating the
     buffer that captured CUDA graphs point at; unlock restores growth."""

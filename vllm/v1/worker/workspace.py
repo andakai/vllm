@@ -203,17 +203,33 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
+    def reserve_simultaneous(
+        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+    ) -> None:
+        """Reserve simultaneous workspace for every ubatch in the current lane."""
+        total_bytes = sum(
+            round_up(_compute_bytes(shape, dtype), 256)
+            for shape, dtype in shapes_and_dtypes
+        )
+        lane = self._get_workspace_id() % self._num_lanes
+        for workspace_id in range(lane, len(self._current_workspaces), self._num_lanes):
+            self._ensure_workspace_size(total_bytes, workspace_id)
+
+    def _ensure_workspace_size(
+        self, required_bytes: int, workspace_id: int | None = None
+    ) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
         Args:
             required_bytes: The number of bytes required.
+            workspace_id: Workspace slot to resize. Defaults to the current slot.
 
         Returns:
             The current workspace tensor.
 
         """
-        workspace_id = self._get_workspace_id()
+        if workspace_id is None:
+            workspace_id = self._get_workspace_id()
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
 

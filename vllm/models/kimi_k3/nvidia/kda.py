@@ -824,6 +824,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if attn_metadata_raw is None:
+            if self._flashkda_buffer_specs is not None:
+                current_workspace_manager().reserve_simultaneous(
+                    *self._flashkda_buffer_specs
+                )
             return
 
         from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
@@ -835,6 +839,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
         if attn_metadata_narrowed is None:
+            if self._flashkda_buffer_specs is not None:
+                current_workspace_manager().reserve_simultaneous(
+                    *self._flashkda_buffer_specs
+                )
             return
         assert isinstance(attn_metadata_narrowed, KimiK3KDAMetadata)
         m = attn_metadata_narrowed

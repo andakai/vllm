@@ -76,6 +76,7 @@ def test_kda_warmup_skips_missing_metadata(monkeypatch):
     )
     layer = object.__new__(nvidia_kda.KimiK3DeltaAttention)
     object.__setattr__(layer, "prefix", "language_model.model.layers.0.self_attn")
+    object.__setattr__(layer, "_flashkda_buffer_specs", None)
     empty = torch.empty(0, device=DEVICE)
 
     assert layer._forward(empty, empty, empty, empty, empty) is None

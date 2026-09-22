@@ -457,12 +457,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attn_metadata_raw = forward_context.attn_metadata
 
         if attn_metadata_raw is None:
+            if self._flashkda_buffer_specs is not None:
+                current_workspace_manager().reserve_simultaneous(
+                    *self._flashkda_buffer_specs
+                )
             return
 
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
         if attn_metadata_narrowed is None:
             # Profile/warmup dummy runs may omit mamba-family metadata.
+            if self._flashkda_buffer_specs is not None:
+                current_workspace_manager().reserve_simultaneous(
+                    *self._flashkda_buffer_specs
+                )
             return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
         has_initial_state = attn_metadata_narrowed.has_initial_state
