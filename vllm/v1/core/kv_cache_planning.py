@@ -15,7 +15,6 @@ from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
 from vllm.v1.hisparse.layout import (
-    create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
@@ -996,6 +995,37 @@ def _get_kv_cache_bytes_per_block(
     return bytes_per_block
 
 
+def _get_gpu_backing_size(kv_cache_config: KVCacheConfig) -> int:
+    """Return the size of the config's single device backing allocation."""
+    if not kv_cache_config.kv_cache_groups:
+        assert not kv_cache_config.kv_cache_tensors
+        return 0
+
+    backing_sizes = {
+        tensor.size
+        for tensor in kv_cache_config.kv_cache_tensors
+        if not tensor.host_resident
+    }
+    if len(backing_sizes) != 1:
+        raise ValueError(
+            "KV cache tensors must share one GPU backing allocation, but got "
+            f"sizes {sorted(backing_sizes)}."
+        )
+    return backing_sizes.pop()
+
+
+def _get_gpu_backing_bytes_per_block(
+    builder: KVCacheConfigBuilder,
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    unit_config = builder.get_kv_cache_config_from_groups(
+        vllm_config, kv_cache_groups, num_blocks=1
+    )
+    assert unit_config.num_blocks == 1
+    return _get_gpu_backing_size(unit_config)
+
+
 def _max_memory_usage_bytes(
     vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
 ) -> int:
@@ -1004,11 +1034,11 @@ def _max_memory_usage_bytes(
 
 
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
-    """Core-owned KV cache planning with three customization hooks.
+    """Core-owned KV cache planning with two customization hooks.
 
-    Model and platform builders can customize logical grouping, per-block
-    pool accounting, and exact-block physical placement. Core retains the
-    cross-worker planning flow and its global invariants.
+    Model and platform builders can customize logical grouping and exact-block
+    physical placement. Core retains the cross-worker planning flow and its
+    global invariants.
     """
 
     def get_kv_cache_configs(
@@ -1064,9 +1094,7 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
             available_memory = [min(available_memory)] * len(available_memory)
 
         pool_bytes_per_worker = [
-            self._get_pool_bytes_per_block_for_config(vllm_config, groups)
-            if groups
-            else 0
+            _get_gpu_backing_bytes_per_block(self, vllm_config, groups) if groups else 0
             for groups in projected_groups_per_worker
         ]
         override = vllm_config.cache_config.num_gpu_blocks_override
@@ -1338,24 +1366,6 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
             ),
         )
 
-    def get_pool_bytes_per_block(self, kv_cache_groups: list[KVCacheGroupSpec]) -> int:
-        """Return bytes consumed by one global block ID in the physical pool."""
-        return _get_kv_cache_bytes_per_block(kv_cache_groups)
-
-    def _get_pool_bytes_per_block_for_config(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_groups: list[KVCacheGroupSpec],
-    ) -> int:
-        if vllm_config.attention_config.hisparse_config is None:
-            return self.get_pool_bytes_per_block(kv_cache_groups)
-
-        host_budget = get_hisparse_host_pool_bytes(vllm_config)
-        hisparse_layout = create_hisparse_layout(
-            vllm_config, kv_cache_groups, host_budget
-        )
-        return self.get_pool_bytes_per_block(hisparse_layout.device_groups)
-
     def _estimate_max_model_len_from_groups(
         self,
         vllm_config: VllmConfig,
@@ -1373,8 +1383,8 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
             vllm_config.model_config.max_model_len = model_len
             if hisparse_enabled:
                 try:
-                    bytes_per_block = self._get_pool_bytes_per_block_for_config(
-                        vllm_config, kv_cache_groups
+                    bytes_per_block = _get_gpu_backing_bytes_per_block(
+                        self, vllm_config, kv_cache_groups
                     )
                     config = self.get_kv_cache_config_from_groups(
                         vllm_config,
@@ -1423,8 +1433,8 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         if vllm_config.attention_config.hisparse_config is not None:
             return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
 
-        bytes_per_block = self._get_pool_bytes_per_block_for_config(
-            vllm_config, kv_cache_groups
+        bytes_per_block = _get_gpu_backing_bytes_per_block(
+            self, vllm_config, kv_cache_groups
         )
         total_blocks = 0
         for group in kv_cache_groups:

@@ -54,20 +54,18 @@ class KVCacheConfigBuilder(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_pool_bytes_per_block(
-        self, kv_cache_groups: list["KVCacheGroupSpec"]
-    ) -> int:
-        """Return bytes consumed by one global block ID in the physical pool."""
-        raise NotImplementedError
-
-    @abstractmethod
     def get_kv_cache_config_from_groups(
         self,
         vllm_config: "VllmConfig",
         kv_cache_groups: list["KVCacheGroupSpec"],
         num_blocks: int,
     ) -> "KVCacheConfig":
-        """Materialize groups for exactly ``num_blocks`` global block IDs."""
+        """Materialize groups for exactly ``num_blocks`` global block IDs.
+
+        Every non-host-resident tensor must name the same device backing size,
+        which must scale linearly with ``num_blocks``. Host-resident tensors,
+        such as HiSparse source storage, are excluded from GPU accounting.
+        """
         raise NotImplementedError
 
 

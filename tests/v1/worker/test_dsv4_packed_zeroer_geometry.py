@@ -140,7 +140,8 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     vllm_config.cache_config.num_gpu_blocks_override = None
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
     vllm_config.attention_config.hisparse_config = None
-    bytes_per_block = _default_builder.get_pool_bytes_per_block(groups)
+    unit_config = get_kv_cache_config_from_groups(vllm_config, groups, 1)
+    (bytes_per_block,) = {tensor.size for tensor in unit_config.kv_cache_tensors}
     config = get_kv_cache_config_from_groups(
         vllm_config, groups, 8 * 1024 * 1024 // bytes_per_block
     )

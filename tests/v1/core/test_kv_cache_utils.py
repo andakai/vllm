@@ -44,6 +44,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
     _estimate_max_model_len,
+    _get_gpu_backing_size,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -97,6 +98,13 @@ default_builder = DefaultKVCacheConfigBuilder()
 glm5_builder = Glm5NextKVCacheConfigBuilder()
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _get_gpu_bytes_per_block(builder, vllm_config, groups):
+    unit_config = builder.get_kv_cache_config_from_groups(
+        vllm_config, groups, num_blocks=1
+    )
+    return _get_gpu_backing_size(unit_config)
 
 
 @pytest.mark.parametrize("gpu_block_size", [32, 64])
@@ -157,18 +165,20 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
 
-    class PaddedPoolBuilder(DefaultKVCacheConfigBuilder):
-        def get_pool_bytes_per_block(self, kv_cache_groups):
-            return super().get_pool_bytes_per_block(kv_cache_groups) + 4096
-
-    hisparse_layout = create_hisparse_layout(config, [group], 2**30)
-    expected_pool_bytes = (
-        default_builder.get_pool_bytes_per_block(hisparse_layout.device_groups) + 4096
+    unit_config = default_builder.get_kv_cache_config_from_groups(
+        config, [group], num_blocks=1
     )
-    assert (
-        PaddedPoolBuilder()._get_pool_bytes_per_block_for_config(config, [group])
-        == expected_pool_bytes
-    )
+    device_sizes = {
+        tensor.size
+        for tensor in unit_config.kv_cache_tensors
+        if not tensor.host_resident
+    }
+    host_sizes = {
+        tensor.size for tensor in unit_config.kv_cache_tensors if tensor.host_resident
+    }
+    assert len(device_sizes) == 1
+    assert host_sizes and host_sizes != device_sizes
+    assert _get_gpu_backing_size(unit_config) == next(iter(device_sizes))
 
     cache_config = default_builder.get_kv_cache_config_from_groups(
         config, [group], num_blocks=7
@@ -2589,7 +2599,7 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
         assert group.kv_cache_spec.page_size_padded == mla_page
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = glm5_builder.get_pool_bytes_per_block(groups)
+    bytes_per_block = _get_gpu_bytes_per_block(glm5_builder, vllm_config, groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     # Every block id is charged the full per-block sum.
@@ -2630,11 +2640,11 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
 
 
 def test_glm5_builder_reuses_core_capacity_planning():
-    """GLM customizes the three hooks while Core chooses exact capacity."""
+    """GLM customizes both hooks while Core chooses exact capacity."""
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
     kv_cache_spec, _ = _glm5_like_kv_cache_spec()
     groups = glm5_builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
-    bytes_per_block = glm5_builder.get_pool_bytes_per_block(groups)
+    bytes_per_block = _get_gpu_bytes_per_block(glm5_builder, vllm_config, groups)
 
     (config,) = glm5_builder.get_kv_cache_configs(
         vllm_config,
@@ -2682,7 +2692,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     )
     assert tail_inner.page_size_padded == idx_page
 
-    bytes_per_block = glm5_builder.get_pool_bytes_per_block(groups)
+    bytes_per_block = _get_gpu_bytes_per_block(glm5_builder, vllm_config, groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = glm5_builder.get_kv_cache_config_from_groups(
@@ -2852,7 +2862,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     ]
     assert [len(group.layer_names) for group in mamba_groups] == [5, 5, 4, 4]
 
-    bytes_per_block = glm5_builder.get_pool_bytes_per_block(groups)
+    bytes_per_block = _get_gpu_bytes_per_block(glm5_builder, vllm_config, groups)
     assert bytes_per_block == 5 * mla_page + 5 * idx_page
 
     kv_cache_config = glm5_builder.get_kv_cache_config_from_groups(
@@ -2940,7 +2950,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag():
 
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
-    bytes_per_block = glm5_builder.get_pool_bytes_per_block(groups)
+    bytes_per_block = _get_gpu_bytes_per_block(glm5_builder, vllm_config, groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = glm5_builder.get_kv_cache_config_from_groups(
@@ -2984,7 +2994,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
     for group in mamba_groups:
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = glm5_builder.get_pool_bytes_per_block(groups)
+    bytes_per_block = _get_gpu_bytes_per_block(glm5_builder, vllm_config, groups)
     assert bytes_per_block == 7 * mla_page
 
     kv_cache_config = glm5_builder.get_kv_cache_config_from_groups(
@@ -3017,6 +3027,7 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     """
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
 
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     for i in range(45):
@@ -3054,7 +3065,9 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     expected_max_mem = glm5_builder._get_max_memory_usage_bytes_from_groups(
         vllm_config, unwrapped_groups
     )
-    expected_pool = glm5_builder.get_pool_bytes_per_block(unwrapped_groups)
+    expected_pool = _get_gpu_bytes_per_block(
+        glm5_builder, vllm_config, unwrapped_groups
+    )
     expected_blocks_per_request = (
         expected_max_mem + expected_pool - 1
     ) // expected_pool
@@ -4060,6 +4073,7 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
     block_size = 16
     max_model_len = 512  # needs 512 / 16 = 32 blocks
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = new_kv_cache_spec(block_size=block_size)
 
     # 32 blocks -> only 31 usable after the null block: one short -> reject.

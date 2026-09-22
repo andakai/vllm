@@ -320,12 +320,6 @@ class Glm5NextKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return groups
         return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
 
-    def get_pool_bytes_per_block(self, kv_cache_groups: list[KVCacheGroupSpec]) -> int:
-        layout = _get_glm_layout(kv_cache_groups)
-        if layout is None:
-            return super().get_pool_bytes_per_block(kv_cache_groups)
-        return _get_glm_pool_bytes_per_block(layout)
-
     def get_kv_cache_config_from_groups(
         self,
         vllm_config: VllmConfig,

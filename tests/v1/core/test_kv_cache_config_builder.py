@@ -14,7 +14,11 @@ from vllm.v1.core.kv_cache_config_builder import (
     get_kv_cache_config_builder,
 )
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+)
 
 
 def _make_vllm_config(builder_cls_path: str | None = None) -> MagicMock:
@@ -113,14 +117,60 @@ class TestBuilderResolution:
             assert active.get_kv_cache_configs(cfg, [], [0]) == []
             g.assert_called_once()
 
-    def test_public_interface_declares_entry_point_and_three_hooks(self):
+    def test_public_interface_declares_entry_point_and_two_hooks(self):
         assert KVCacheConfigBuilder.__abstractmethods__ == {
             "get_kv_cache_configs",
             "get_kv_cache_groups",
-            "get_pool_bytes_per_block",
             "get_kv_cache_config_from_groups",
         }
         assert issubclass(DefaultKVCacheConfigBuilder, KVCacheConfigBuilder)
+
+    @patch(
+        "vllm.v1.core.kv_cache_planning.KVCacheSpecRegistry."
+        "check_kv_cache_spec_registry"
+    )
+    def test_capacity_is_derived_from_unit_placement(self, _mock_check):
+        class PlacementBuilder(DefaultKVCacheConfigBuilder):
+            seen_num_blocks: list[int] = []
+
+            def get_kv_cache_groups(self, vllm_config, kv_cache_spec):
+                return [KVCacheGroupSpec(["layer"], MagicMock())]
+
+            def get_kv_cache_config_from_groups(
+                self, vllm_config, kv_cache_groups, num_blocks
+            ):
+                self.seen_num_blocks.append(num_blocks)
+                return KVCacheConfig(
+                    num_blocks=num_blocks,
+                    kv_cache_tensors=[
+                        KVCacheTensor(
+                            size=64 * num_blocks,
+                            layers=["layer"],
+                            layer_stride=64 * num_blocks,
+                            block_stride=64,
+                        )
+                    ],
+                    kv_cache_groups=kv_cache_groups,
+                )
+
+            def _get_max_memory_usage_bytes_from_groups(
+                self, vllm_config, kv_cache_groups
+            ):
+                return 0
+
+        cfg = _make_vllm_config()
+        cfg.num_prefill_lookahead_tokens = 0
+        cfg.attention_config.hisparse_config = None
+        cfg.cache_config.num_gpu_blocks_override = None
+        cfg.model_config.original_max_model_len = 1
+        cfg.model_config.max_model_len = 1
+        builder = PlacementBuilder()
+
+        (config,) = builder.get_kv_cache_configs(cfg, [{"layer": MagicMock()}], [223])
+
+        assert builder.seen_num_blocks == [1, 3]
+        assert config.num_blocks == 3
+        assert {tensor.size for tensor in config.kv_cache_tensors} == {192}
 
     @patch("vllm.platforms.current_platform")
     def test_profiling_reuses_exact_block_materializer(self, mock_platform):
