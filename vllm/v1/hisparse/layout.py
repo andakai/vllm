@@ -64,12 +64,14 @@ def get_hisparse_kv_cache_groups(
     if not mla_specs or not other_specs:
         return None
 
-    from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
+    from vllm.v1.core.kv_cache_config_builder import (
+        get_kv_cache_config_builder,
+    )
 
     mla_group_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
     assert mla_group_spec is not None
     mla_group = KVCacheGroupSpec(list(mla_specs), mla_group_spec)
-    builder = KVCacheConfigBuilder._resolve(vllm_config)
+    builder = get_kv_cache_config_builder(vllm_config)
     return [mla_group, *builder.get_kv_cache_groups(vllm_config, other_specs)]
 
 

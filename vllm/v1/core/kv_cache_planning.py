@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
@@ -1002,7 +1003,7 @@ def _max_memory_usage_bytes(
     return sum(spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
 
 
-class DefaultKVCacheConfigBuilder:
+class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
     """Core-owned KV cache planning with three customization hooks.
 
     Model and platform builders can customize logical grouping, per-block
@@ -1361,7 +1362,7 @@ class DefaultKVCacheConfigBuilder:
         kv_cache_groups: list[KVCacheGroupSpec],
         available_memory: int,
     ) -> int:
-        """See ``KVCacheConfigBuilder._estimate_max_model_len_from_groups``."""
+        """Estimate the largest model length whose cache fits in memory."""
         original_max = vllm_config.model_config.max_model_len
         hisparse_enabled = (
             vllm_config.attention_config.hisparse_config is not None

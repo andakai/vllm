@@ -1,43 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pluggable KV cache config builder resolution."""
+"""Interface and resolution for pluggable KV cache config builders."""
 
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheSpec,
+    )
 
 
-class KVCacheConfigBuilder:
-    """Resolve and invoke the active KV cache config builder.
+class KVCacheConfigBuilder(ABC):
+    """Interface for model- or platform-specific KV cache planning.
 
-    Resolution priority is owned by the platform hook
-    (:meth:`vllm.platforms.interface.Platform.get_kv_cache_config_builder_cls`);
-    this class only caches the resolved builder and exposes the Core planning
-    entry point. Model and platform builders customize the three hooks on
-    :class:`DefaultKVCacheConfigBuilder` instead.
+    Subclasses normally inherit from ``DefaultKVCacheConfigBuilder`` and
+    override only the hooks they need. A platform may replace the top-level
+    planning method when it cannot use Core's cross-worker planning flow.
     """
 
-    _active: "DefaultKVCacheConfigBuilder | None" = None
-
-    @classmethod
-    def _resolve(cls, vllm_config: "VllmConfig") -> "DefaultKVCacheConfigBuilder":
-        if cls._active is None:
-            from vllm.platforms import current_platform
-
-            builder_cls = resolve_obj_by_qualname(
-                current_platform.get_kv_cache_config_builder_cls(vllm_config)
-            )
-            cls._active = builder_cls()
-        return cls._active
-
-    @classmethod
+    @abstractmethod
     def get_kv_cache_configs(
-        cls,
+        self,
         vllm_config: "VllmConfig",
         kv_cache_specs: list[dict[str, "KVCacheSpec"]],
         available_memory: list[int],
@@ -53,9 +42,51 @@ class KVCacheConfigBuilder:
 
         Consumed by ``vllm/v1/engine/core.py``.
         """
-        return cls._resolve(vllm_config).get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_memory
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_kv_cache_groups(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: dict[str, "KVCacheSpec"],
+    ) -> list["KVCacheGroupSpec"]:
+        """Organize layer specs into scheduler-visible cache groups."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_pool_bytes_per_block(
+        self, kv_cache_groups: list["KVCacheGroupSpec"]
+    ) -> int:
+        """Return bytes consumed by one global block ID in the physical pool."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_kv_cache_config_from_groups(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_groups: list["KVCacheGroupSpec"],
+        num_blocks: int,
+    ) -> "KVCacheConfig":
+        """Materialize groups for exactly ``num_blocks`` global block IDs."""
+        raise NotImplementedError
+
+
+_active_builder: KVCacheConfigBuilder | None = None
+
+
+def get_kv_cache_config_builder(
+    vllm_config: "VllmConfig",
+) -> KVCacheConfigBuilder:
+    """Resolve and cache the builder selected by the current platform."""
+    global _active_builder
+    if _active_builder is None:
+        from vllm.platforms import current_platform
+
+        builder_cls = resolve_obj_by_qualname(
+            current_platform.get_kv_cache_config_builder_cls(vllm_config)
         )
+        _active_builder = builder_cls()
+    return _active_builder
 
 
 def _get_profiling_kv_cache_config(
@@ -64,7 +95,7 @@ def _get_profiling_kv_cache_config(
     min_blocks: int,
 ) -> "KVCacheConfig":
     """Build profiling storage through the active builder's normal hooks."""
-    builder = KVCacheConfigBuilder._resolve(vllm_config)
+    builder = get_kv_cache_config_builder(vllm_config)
     groups = builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
     return builder.get_kv_cache_config_from_groups(
         vllm_config, groups, max(min_blocks, 1)

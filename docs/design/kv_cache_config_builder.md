@@ -11,6 +11,12 @@ entry point and three hooks:
 | `get_pool_bytes_per_block` | Model or platform | Report the physical pool cost of one global block ID. |
 | `get_kv_cache_config_from_groups` | Model or platform | Materialize groups for an exact `num_blocks`, including backing sizes, aliases, offsets, and strides. |
 
+`KVCacheConfigBuilder` declares this interface in
+`vllm/v1/core/kv_cache_config_builder.py`.
+`DefaultKVCacheConfigBuilder` implements it in `kv_cache_planning.py`; builder
+selection is separate module-level infrastructure via
+`get_kv_cache_config_builder`, with its cache kept private.
+
 Core owns spec validation, MTP retention, pipeline-stage projection,
 `num_gpu_blocks_override`, null-block reservation, automatic model-length
 fitting, admission checks, and cross-rank block-count convergence. These are
