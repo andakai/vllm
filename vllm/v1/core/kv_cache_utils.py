@@ -22,7 +22,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
-from vllm.utils.hashing import xxhash, xxhash_cbor
+from vllm.utils.hashing import sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -176,6 +176,9 @@ class KVCacheBlock:
     # Number of prefix tokens covered by _block_hash. For full blocks this is
     # the full block boundary; partial entries can end inside a cache block.
     _block_hash_num_tokens: int | None = None
+    # {hash entry end: writer's next tokens there}. EAGLE draft KV at an
+    # entry's end reads them (``get_boundary_keys``); its hash does not.
+    boundary_keys: dict[int, tuple[Any, ...]] | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -208,6 +211,7 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
         self._block_hash_num_tokens = None
+        self.boundary_keys = None
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -799,6 +803,90 @@ def partial_hash_hits_enabled(
         )
         return False
     return True
+
+
+# Maps a hit length to the request's boundary keys there.
+BoundaryKeysFn = Callable[[int], tuple[Any, ...] | None]
+
+
+def get_boundary_block_hash(
+    block_hash: BlockHash, boundary_keys: tuple[Any, ...]
+) -> BlockHash:
+    """``block_hash`` extended with its boundary keys, for external tiers that
+    address EAGLE draft KV by content."""
+    return BlockHash(sha256_cbor((block_hash, boundary_keys)))
+
+
+def get_boundary_keys(
+    request: Request, start: int, num_tokens: int
+) -> tuple[Any, ...] | None:
+    """Request inputs at ``[start, start + num_tokens)``, which EAGLE draft KV
+    right before ``start`` depends on; None if not all known yet.
+
+    Multimodal positions are keyed by item and offset, since the drafter reads
+    their embeddings rather than the placeholder token ids.
+    """
+    end = start + num_tokens
+    if end > request.num_tokens or request.prompt_embeds is not None:
+        return None
+    keys: list[Any] = list(request.all_token_ids[start:end])
+    mm_features = request.mm_features
+    if mm_features and (
+        mm_features[-1].mm_position.offset + mm_features[-1].mm_position.length > start
+    ):
+        for feature in mm_features:
+            pos = feature.mm_position
+            for i in range(max(start, pos.offset), min(end, pos.offset + pos.length)):
+                keys[i - start] = (feature.identifier, i - pos.offset)
+    return tuple(keys)
+
+
+def resolve_eagle_boundary_tokens(
+    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig
+) -> int:
+    """Resolve ``CacheConfig.eagle_boundary_tokens``.
+
+    Only drafters reading just the next token (EAGLE, EAGLE3, single-module
+    MTP) are tracked, and only when every draft group's manager can verify a
+    hit's last block. Hybrid Mamba models keep the drop with a KV connector
+    whose external tiers place Mamba checkpoints for it.
+    """
+    spec = vllm_config.speculative_config
+    if (
+        not vllm_config.cache_config.enable_prefix_caching
+        or spec is None
+        or not spec.use_eagle_block_drop()
+        or spec.disable_eagle_boundary_check
+        or spec.method not in ("eagle", "eagle3", "mtp")
+        or vllm_config.num_prefill_lookahead_tokens != 1
+        or vllm_config.attention_config.hisparse_config is not None
+        or vllm_config.cache_config.enable_mamba_shared_prefix_checkpoint
+    ):
+        return 0
+    if vllm_config.kv_transfer_config is not None and kv_cache_config.has_mamba_layers:
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+
+        connector_cls = KVConnectorFactory.get_connector_class(
+            vllm_config.kv_transfer_config
+        )
+        if not connector_cls.supports_eagle_boundary_keys(vllm_config):
+            return 0
+    groups = [
+        g for g in kv_cache_config.kv_cache_groups if g.kv_cache_spec.prefix_cacheable
+    ]
+    # Same fallback as the coordinator: no flagged group means all are.
+    eagle_groups = [g for g in groups if g.is_eagle_group] or groups
+    for group in eagle_groups:
+        if isinstance(group.kv_cache_spec, MambaSpec):
+            continue  # Never drops: drafters have no Mamba layers.
+        manager_cls = KVCacheSpecRegistry.get_manager_class(
+            group.kv_cache_spec, group.role
+        )
+        if manager_cls is None or not manager_cls.supports_eagle_boundary_proof:
+            return 0
+    return 1
 
 
 def eagle_proof_margin(

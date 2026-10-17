@@ -9,6 +9,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    BoundaryKeysFn,
     KVCacheBlock,
     eagle_proof_margin,
     partial_hash_hits_enabled,
@@ -131,6 +132,17 @@ class KVCacheCoordinator(ABC):
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        # With boundary keys, EAGLE hits keep their last block once proven
+        # (``CacheConfig.eagle_boundary_tokens``), so cache placement no longer
+        # assumes the drop.
+        self.eagle_boundary_tokens = (
+            kv_cache_config.eagle_boundary_tokens
+            if enable_caching and self.eagle_group_ids
+            else 0
+        )
+        self.drop_eagle_placement = (
+            bool(self.eagle_group_ids) and not self.eagle_boundary_tokens
+        )
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
@@ -171,7 +183,7 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
         # Match Mamba checkpoints to Eagle's attention replay boundary.
-        if use_eagle:
+        if self.drop_eagle_placement:
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
@@ -364,7 +376,7 @@ class KVCacheCoordinator(ABC):
         boundaries = replay_boundaries(
             request.num_prompt_tokens,
             self.scheduler_block_size,
-            use_eagle=bool(self.eagle_group_ids),
+            use_eagle=self.drop_eagle_placement,
         )
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
@@ -375,6 +387,23 @@ class KVCacheCoordinator(ABC):
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )
+
+    def _init_eagle_manager(self, manager: SingleTypeKVCacheManager) -> None:
+        """Configure a manager whose prefix-cache hits drop the EAGLE block."""
+        if not self.eagle_boundary_tokens:
+            manager.use_eagle = True
+        elif manager.supports_eagle_boundary_proof:
+            manager.eagle_boundary_tokens = self.eagle_boundary_tokens
+
+    def _boundary_kwargs(
+        self, group_ids: list[int], boundary_keys: BoundaryKeysFn | None
+    ) -> dict[str, BoundaryKeysFn]:
+        """Finder kwargs proving this spec group's EAGLE tail, if it records."""
+        if boundary_keys is None or not any(
+            self.single_type_managers[gid].eagle_boundary_tokens for gid in group_ids
+        ):
+            return {}
+        return {"boundary_keys": boundary_keys}
 
     def emit_cached_block_events(
         self, request: Request, computed_blocks: tuple[list[KVCacheBlock], ...]
@@ -461,10 +490,13 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        boundary_keys: BoundaryKeysFn | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
         ``num_uncached_common_prefix_tokens`` (a shared prefix that a
-        sparse-retention group has not cached yet; 0 unless hybrid)."""
+        sparse-retention group has not cached yet; 0 unless hybrid).
+        ``boundary_keys`` lets EAGLE hits keep a proven last block (see
+        ``FullAttentionManager.find_longest_cache_hit``)."""
         pass
 
     def new_step_starts(self) -> None:
@@ -514,6 +546,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        boundary_keys: BoundaryKeysFn | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -568,13 +601,14 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         assert len(self.kv_cache_config.kv_cache_groups) == 1, (
             "UnitaryKVCacheCoordinator assumes only one kv cache group"
         )
-        # Single group; useless but just set ``use_eagle`` for consistency regardless.
-        self.single_type_managers[0].use_eagle = 0 in self.eagle_group_ids
+        if 0 in self.eagle_group_ids:
+            self._init_eagle_manager(self.single_type_managers[0])
 
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        boundary_keys: BoundaryKeysFn | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -586,6 +620,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
+            **self._boundary_kwargs([0], boundary_keys),
         )
         # Single group: nothing "uncached common" -- no other group to lag it.
         return hit_blocks, hit_length, 0
@@ -762,7 +797,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for group in self.attention_groups:
             if group.use_eagle:
                 for gid in group.group_ids:
-                    self.single_type_managers[gid].use_eagle = True
+                    self._init_eagle_manager(self.single_type_managers[gid])
 
     def _align_cacheable(self, num_tokens: int) -> int:
         """Largest prefix of ``num_tokens`` a future cache hit could match.
@@ -797,6 +832,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        boundary_keys: BoundaryKeysFn | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -808,6 +844,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
+            boundary_keys: See ``KVCacheCoordinator.find_longest_cache_hit``.
 
         Returns:
             A tuple containing:
@@ -855,14 +892,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     continue
 
                 drop_eagle_block = use_eagle and idx not in eagle_verified
+                kwargs = self._boundary_kwargs(group_ids, boundary_keys)
 
                 _max_length = curr_hit_length
                 # Eagle matches one extra drop unit (one hash unit for
                 # fine-grained managers, else one cache block) and then drops
                 # it, landing back at the candidate length. No margin for
                 # mamba: its finder never drops (draft models have no mamba
-                # layers), so the hit would grow past the candidate.
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                # layers), so the hit would grow past the candidate. Nor with
+                # boundary keys: a proven hit keeps the candidate length.
+                if drop_eagle_block and not kwargs and not isinstance(spec, MambaSpec):
                     eagle_margin = eagle_proof_margin(
                         group_block_size,
                         self.hash_block_size,
@@ -887,6 +926,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     pcp_world_size=self.single_type_managers[
                         first_group_id
                     ].pcp_world_size,
+                    **kwargs,
                 )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
@@ -934,6 +974,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        boundary_keys: BoundaryKeysFn | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.
 
@@ -947,8 +988,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
+            kwargs = self._boundary_kwargs(group_ids, boundary_keys)
             lookup_length = max_cache_hit_length
-            if use_eagle and not isinstance(spec, MambaSpec):
+            if use_eagle and not kwargs and not isinstance(spec, MambaSpec):
                 eagle_margin = eagle_proof_margin(
                     manager.block_size,
                     self.hash_block_size,
@@ -969,6 +1011,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=manager.dcp_world_size,
                 pcp_world_size=manager.pcp_world_size,
+                **kwargs,
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks

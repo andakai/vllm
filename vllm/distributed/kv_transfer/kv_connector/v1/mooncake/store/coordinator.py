@@ -156,7 +156,12 @@ class MooncakeStoreCoordinator:
             ],
             scheduler_block_size,
             hash_block_size,
-            use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            # Boundary keys address draft KV by its next tokens: no EAGLE drop.
+            use_eagle=(
+                spec_config is not None
+                and spec_config.use_eagle_block_drop()
+                and not kv_cache_config.eagle_boundary_tokens
+            ),
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             enable_partial_hash_hits=(
                 alignment is not None and alignment < scheduler_block_size

@@ -452,6 +452,9 @@ class SpeculativeConfig:
     speculative methods. This is an experimental option for measuring the
     acceptance-rate impact of reusing that block. It does not disable the
     speculative drafter itself."""
+    disable_eagle_boundary_check: bool = False
+    """Always drop the trailing EAGLE prefix-cache block, even when the cache
+    writer is known to have seen the same next token as the request."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
     MTP). "fp8" uses per-row weight and per-token activation scales on the

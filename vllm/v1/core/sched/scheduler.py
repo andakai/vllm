@@ -305,6 +305,7 @@ class Scheduler(SchedulerInterface):
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
+        use_eagle_block_drop = False
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
@@ -313,13 +314,20 @@ class Scheduler(SchedulerInterface):
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
             self.use_eagle = speculative_config.use_eagle()
-            self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
-            if self.use_eagle and not self.use_eagle_block_drop:
+            use_eagle_block_drop = speculative_config.use_eagle_block_drop()
+            if self.use_eagle and not use_eagle_block_drop:
                 logger.warning(
                     "EAGLE trailing prefix-cache block dropping is disabled. "
                     "This is experimental and may affect speculative-token "
                     "acceptance rates."
                 )
+        # Boundary keys let EAGLE hits keep a proven last block, so cache
+        # placement (Mamba checkpoints) no longer backs off for the drop. Must
+        # match the worker's ``MambaPrefillCheckpointBuilder``.
+        self.eagle_boundary_tokens = kv_cache_config.eagle_boundary_tokens
+        self.use_eagle_block_drop = (
+            use_eagle_block_drop and not self.eagle_boundary_tokens
+        )
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -330,7 +338,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
-            use_eagle=self.use_eagle_block_drop,
+            use_eagle=use_eagle_block_drop,
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -2596,6 +2604,9 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens -= len(new_token_ids) - num_new
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
+        # The drafter read exactly these tokens past the cached blocks.
+        if self.eagle_boundary_tokens and not is_stale:
+            self.kv_cache_manager.record_boundary_keys(request)
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:

@@ -103,6 +103,7 @@ def make_full_mamba_manager(
     use_eagle: bool = False,
     num_speculative_blocks: int = 0,
     num_prefill_checkpoint_blocks: int = 0,
+    eagle_boundary_tokens: int = 0,
 ):
     mamba_group = KVCacheGroupSpec(
         ["mamba"],
@@ -133,6 +134,7 @@ def make_full_mamba_manager(
             ),
             mamba_group,
         ],
+        eagle_boundary_tokens=eagle_boundary_tokens,
     )
     scheduler_block_size = lcm(
         full_block_size * dcp_world_size,
@@ -158,7 +160,10 @@ def make_full_mamba_manager(
         *[(8, 128, 896, p, 1) for p in (127, 128, 129, 7040, 7168, 7296, 7449)],
     ],
 )
-@pytest.mark.parametrize("use_eagle", [False, True])
+# Boundary keys keep the EAGLE tail, so hits match the non-EAGLE ones.
+@pytest.mark.parametrize(
+    "use_eagle,boundary", [(False, False), (True, False), (True, True)]
+)
 @pytest.mark.parametrize("extension_tokens", [0, 32])
 def test_dcp_fine_hit_retention_uses_hash_alignment(
     dcp_world_size,
@@ -167,6 +172,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
     prompt_tokens,
     checkpoint_blocks,
     use_eagle,
+    boundary,
     extension_tokens,
 ):
     """Resends and extensions reuse the retained hash-aligned checkpoint."""
@@ -179,6 +185,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         use_eagle=use_eagle,
         num_speculative_blocks=4 if use_eagle else 0,
         num_prefill_checkpoint_blocks=checkpoint_blocks,
+        eagle_boundary_tokens=int(boundary),
     )
     manager.coordinator.retention_interval = 0
     assert manager.coordinator.enable_partial_hash_hits
@@ -188,7 +195,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         hash_block_size=hash_block_size,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle_block_drop=use_eagle,
+        use_eagle_block_drop=use_eagle and not boundary,
         mamba_partial_cache_hit=True,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=bool(checkpoint_blocks),
@@ -214,7 +221,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
     _, hit, _ = manager.get_computed_blocks(replay)
     expected = (
         max((prompt_tokens // hash_block_size - 1) * hash_block_size, 0)
-        if use_eagle
+        if use_eagle and not boundary
         else ((prompt_tokens - 1) // hash_block_size * hash_block_size)
     )
     assert hit == expected

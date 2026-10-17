@@ -1490,6 +1490,8 @@ class KVCacheConfig:
     """Tokens per prefix-cache block hash, resolved by the engine core."""
     cache_hit_alignment_tokens: int | None = None
     """Token granularity of prefix-cache hits, resolved by the engine core."""
+    eagle_boundary_tokens: int = 0
+    """See ``CacheConfig.eagle_boundary_tokens``; resolved by the engine core."""
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
