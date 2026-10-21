@@ -15,6 +15,7 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     try_get_attention_backend,
 )
+from vllm import SamplingParams
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -199,6 +200,41 @@ def test_prepare_next_token_ids():
 
     assert torch.equal(next_token_ids_from_padded, expected_next_token_ids_tensor)
     assert torch.equal(valid_sampled_tokens_count, expected_valid_sampled_tokens_count)
+
+
+@pytest.mark.parametrize("computed,scheduled,expected", [(4, 4, 8), (16, 3, 15)])
+def test_padded_backup_token_stays_within_known_chunk(computed, scheduled, expected):
+    device = torch.device(DEVICE_TYPE)
+    request = CachedRequestState(
+        req_id="chunk",
+        prompt_token_ids=list(range(16)),
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=1),
+        generator=None,
+        block_ids=([0, 1],),
+        num_computed_tokens=computed,
+        output_token_ids=[],
+    )
+    batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=32,
+        max_num_batched_tokens=16,
+        device=device,
+        vocab_size=100,
+        block_sizes=[16],
+        max_num_blocks_per_req=[2],
+    )
+    batch.add_request(request)
+    proposer = _create_proposer("eagle", 1)
+    next_tokens, counts = proposer.prepare_next_token_ids_padded(
+        torch.tensor([[99]], dtype=torch.int32, device=device),
+        {request.req_id: request},
+        batch,
+        torch.tensor([True], dtype=torch.bool, device=device),
+        num_scheduled_tokens={request.req_id: scheduled},
+    )
+    assert next_tokens.tolist() == [expected]
+    assert counts.tolist() == [0]
 
 
 def test_prepare_inputs():
