@@ -14,6 +14,49 @@ from .utils import _run_eagle_correctness
 
 
 @single_gpu_only
+def test_qwen3_eagle3_padded_chunk_inputs(monkeypatch, vllm_runner):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    prompt = list(range(1000, 1192))
+    chunk_inputs = []
+    with vllm_runner(
+        "Qwen/Qwen3-8B",
+        enforce_eager=True,
+        max_model_len=512,
+        max_num_batched_tokens=64,
+        max_num_seqs=1,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        speculative_config={
+            "method": "eagle3",
+            "model": "AngelSlim/Qwen3-8B_eagle3",
+            "num_speculative_tokens": 1,
+        },
+    ) as runner:
+        core = runner.llm.llm_engine.engine_core.engine_core
+        drafter = core.model_executor.driver_worker.worker.model_runner.drafter
+
+        def observe_inputs(module, args, kwargs):
+            positions = kwargs["positions"].tolist()
+            if len(positions) > 1 and max(positions) < len(prompt) - 1:
+                chunk_inputs.append((positions, kwargs["input_ids"].tolist()))
+
+        handle = drafter.model.register_forward_pre_hook(
+            observe_inputs, with_kwargs=True
+        )
+        try:
+            runner.llm.generate(
+                [{"prompt_token_ids": prompt}],
+                SamplingParams(temperature=0, max_tokens=4, ignore_eos=True),
+            )
+        finally:
+            handle.remove()
+    assert len(chunk_inputs) == 2
+    for positions, token_ids in chunk_inputs:
+        assert token_ids == [prompt[position + 1] for position in positions]
+
+
+@single_gpu_only
 @pytest.mark.skipif(
     current_platform.is_device_capability_family(100),
     reason="DeepSeek head_dim=192 not supported on SM100/SM110 (Blackwell)",
