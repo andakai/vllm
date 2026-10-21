@@ -203,9 +203,9 @@ class RequestRunner:
         vllm_config = create_vllm_config(
             block_size=block_size,
             max_num_batched_tokens=1000,
-            disable_hybrid_kv_cache_manager=False,
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
+        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
         vllm_config.parallel_config.world_size = worker_count
         vllm_config.cache_config.prefix_cache_retention_interval = retention_interval
         if speculative_config is not None:

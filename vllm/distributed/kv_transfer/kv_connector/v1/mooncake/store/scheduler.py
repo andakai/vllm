@@ -253,7 +253,7 @@ class MooncakeStoreScheduler:
 
         lookup_result = self.client.lookup(
             request.request_id,
-            request.num_tokens,
+            request.prefill_stop_tokens or request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )

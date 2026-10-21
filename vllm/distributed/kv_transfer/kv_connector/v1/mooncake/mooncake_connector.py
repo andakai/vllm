@@ -630,6 +630,8 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
+    # Nonzero also acknowledges the full-prompt prefill-stop protocol.
+    lookahead_prefill_tokens: int = 0
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -655,6 +657,8 @@ class MooncakeXferResponse(
     # The pull's layout_id once P holds that layout. D omits the layout only
     # after seeing it, so a P that predates this field always gets it.
     layout_id: int = 0
+    # Nonzero also acknowledges the full-prompt prefill-stop protocol.
+    lookahead_prefill_tokens: int = 0
 
 
 @dataclass
@@ -716,6 +720,18 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
+        for component in (self.connector_scheduler, self.connector_worker):
+            if component is not None:
+                component.use_lookahead_block_hashes = enabled
 
     def __init__(
         self,
@@ -913,6 +929,7 @@ class MooncakeConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
+        self.use_lookahead_block_hashes = vllm_config.use_lookahead_block_hashes
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_config = kv_cache_config
 
@@ -986,6 +1003,10 @@ class MooncakeConnectorScheduler:
         always recomputes the last token and must start from h(N-1), and for
         DSV41 SWA bounded replay, whose window is not replayed after a P/D load
         and must be laid out for that token."""
+        if self.use_lookahead_block_hashes:
+            return max(
+                0, num_prompt_tokens - self.vllm_config.num_prefill_lookahead_tokens
+            )
         if (self._has_mamba or self._bounded_replay) and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
@@ -1023,9 +1044,18 @@ class MooncakeConnectorScheduler:
         if (
             params is not None
             and params.get("do_remote_decode")
-            and (self._has_mamba or self._bounded_replay)
+            and (
+                self.use_lookahead_block_hashes
+                or self._has_mamba
+                or self._bounded_replay
+            )
         ):
-            self._truncate_mamba_request_for_prefill(request)
+            if self.use_lookahead_block_hashes:
+                stop = self._get_remote_prefill_token_count(request.num_prompt_tokens)
+                if stop and not request.get_skip_reading_prefix_cache():
+                    request.prefill_stop_tokens = stop
+            else:
+                self._truncate_mamba_request_for_prefill(request)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -1219,6 +1249,7 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        self.use_lookahead_block_hashes = vllm_config.use_lookahead_block_hashes
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -1531,7 +1562,9 @@ class MooncakeConnectorWorker:
                 except Exception as e:
                     logger.error("Error processing Mooncake xfer request: %s", e)
                     error_response = MooncakeXferResponse(
-                        status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
+                        lookahead_prefill_tokens=self.lookahead_prefill_tokens,
+                        status=MooncakeXferResponseStatus.ERROR,
+                        err_msg=str(e),
                     )
                     await sock.send_multipart(
                         (identity, self._encoder.encode(error_response))
@@ -1543,9 +1576,19 @@ class MooncakeConnectorWorker:
             except Exception as e:
                 logger.error("Error in _sender_worker: %s", e)
 
+    @property
+    def lookahead_prefill_tokens(self) -> int:
+        return (
+            self.vllm_config.num_prefill_lookahead_tokens
+            if self.use_lookahead_block_hashes
+            else 0
+        )
+
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
+        if meta.lookahead_prefill_tokens != self.lookahead_prefill_tokens:
+            raise ValueError("Mooncake P/D lookahead prefill protocols differ")
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
         remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
         if meta.remote_tp_rank not in remote_tp_ranks:
@@ -1557,6 +1600,7 @@ class MooncakeConnectorWorker:
             )
             logger.error(msg)
             response = MooncakeXferResponse(
+                lookahead_prefill_tokens=self.lookahead_prefill_tokens,
                 status=MooncakeXferResponseStatus.ERROR,
                 err_msg=msg,
             )
@@ -1577,6 +1621,7 @@ class MooncakeConnectorWorker:
             )
             logger.error(msg)
             response = MooncakeXferResponse(
+                lookahead_prefill_tokens=self.lookahead_prefill_tokens,
                 status=MooncakeXferResponseStatus.ERROR,
                 err_msg=msg,
             )
@@ -1586,6 +1631,7 @@ class MooncakeConnectorWorker:
             stored = self._lookup_peer_layout(meta)
             if stored is None:
                 response = MooncakeXferResponse(
+                    lookahead_prefill_tokens=self.lookahead_prefill_tokens,
                     status=MooncakeXferResponseStatus.LAYOUT_MISS,
                     err_msg=(
                         f"Mooncake KV layout {meta.layout_id:#x} from "
@@ -1601,6 +1647,7 @@ class MooncakeConnectorWorker:
             )
             if prep_err is not None:
                 response = MooncakeXferResponse(
+                    lookahead_prefill_tokens=self.lookahead_prefill_tokens,
                     status=MooncakeXferResponseStatus.ERROR,
                     err_msg=prep_err,
                 )
@@ -1620,6 +1667,7 @@ class MooncakeConnectorWorker:
         )
         if validation_err is not None:
             response = MooncakeXferResponse(
+                lookahead_prefill_tokens=self.lookahead_prefill_tokens,
                 status=MooncakeXferResponseStatus.ERROR,
                 err_msg=validation_err,
             )
@@ -1667,6 +1715,7 @@ class MooncakeConnectorWorker:
                     err_reqs=list(pending_reqs),
                     err_msg="Timeout waiting for P side ready.",
                     layout_id=meta.layout_id,
+                    lookahead_prefill_tokens=self.lookahead_prefill_tokens,
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 break
@@ -1758,6 +1807,7 @@ class MooncakeConnectorWorker:
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
                 layout_id=meta.layout_id,
+                lookahead_prefill_tokens=self.lookahead_prefill_tokens,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -2433,6 +2483,16 @@ class MooncakeConnectorWorker:
                     while True:
                         ret_msg = await sock.recv()
                         response = self._xfer_resp_decoder.decode(ret_msg)
+                        if (
+                            response.lookahead_prefill_tokens
+                            != self.lookahead_prefill_tokens
+                        ):
+                            self._handle_failed_recv(
+                                pull_metas,
+                                req_ids,
+                                "Mooncake P/D lookahead prefill protocols differ",
+                            )
+                            return
                         status = response.status
                         if status == MooncakeXferResponseStatus.LAYOUT_MISS:
                             self._acked_layout_peers.discard(worker_addr)
@@ -2889,6 +2949,7 @@ class MooncakeConnectorWorker:
                 remote_tp_rank=self.tp_rank,
                 remote_pp_size=self.pp_size,
                 layout_id=self._kv_layout_id,
+                lookahead_prefill_tokens=self.lookahead_prefill_tokens,
                 req_blocks=req_blocks,
                 kv_caches_base_addr=[],
                 block_lens=[],
@@ -2901,6 +2962,7 @@ class MooncakeConnectorWorker:
             remote_tp_rank=self.tp_rank,
             remote_pp_size=self.pp_size,
             layout_id=self._kv_layout_id,
+            lookahead_prefill_tokens=self.lookahead_prefill_tokens,
             req_blocks=req_blocks,
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,

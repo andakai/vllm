@@ -147,6 +147,7 @@ def compute_nixl_compatibility_hash(
     vllm_config: VllmConfig,
     attn_backend_name: str,
     transfer_mode: str = "pull",
+    lookahead_prefill_tokens: int = 0,
 ) -> str:
     """Compute compatibility hash for NIXL KV transfer.
 
@@ -202,6 +203,9 @@ def compute_nixl_compatibility_hash(
         "transfer_mode": transfer_mode,
     }
 
+    if lookahead_prefill_tokens:
+        # Full-prompt prefill stops before this known suffix.
+        factors["lookahead_prefill_tokens"] = lookahead_prefill_tokens
     compat_hash = hash_factors(factors)
     logger.debug(
         "NIXL compatibility hash: %s (model=%s, dtype=%s, num_kv_heads=%d, "

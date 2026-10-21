@@ -851,6 +851,10 @@ class OffloadingConnectorScheduler:
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
+        if req_status.req.prefill_stop_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens, req_status.req.prefill_stop_tokens - 1
+            )
         if max_num_new_tokens is not None:
             max_hit_size_tokens = min(
                 max_hit_size_tokens, num_computed_tokens + max_num_new_tokens
@@ -1073,6 +1077,8 @@ class OffloadingConnectorScheduler:
             block_end - 1,
             len(req_status.req.block_hashes) * tokens_per_hash,
         )
+        if req_status.req.prefill_stop_tokens is not None:
+            max_boundary = min(max_boundary, req_status.req.prefill_stop_tokens - 1)
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
         if req_status.max_load_tokens is not None:

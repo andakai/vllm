@@ -243,6 +243,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
+    worker.use_lookahead_block_hashes = False
     worker.shutdown = noop_shutdown
     # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
@@ -562,6 +563,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
 
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker = object.__new__(MooncakeConnectorWorker)
+    worker.use_lookahead_block_hashes = False
     worker.shutdown = noop_shutdown
     worker._physical_blocks_per_logical_kv_block = 17
     worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
@@ -617,3 +619,34 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
         worker.shutdown()
         worker.shutdown = noop_shutdown
         connector.connector_worker = None
+
+
+@pytest.mark.parametrize(
+    "connector_name", ["NixlConnector", "NixlPushConnector", "MooncakeConnector"]
+)
+@pytest.mark.parametrize("prompt_len", [1, 3, 4, 19])
+def test_lookahead_pd_short_prompt_and_transfer_boundary(connector_name, prompt_len):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+
+    config = create_vllm_config(
+        kv_connector=connector_name, kv_role="kv_producer", num_speculative_tokens=3
+    )
+    config.speculative_config.method = "mtp"
+    config.speculative_config.draft_model_config = config.model_config
+    config.model_config.hf_config.num_nextn_predict_layers = 3
+    connector = KVConnectorFactory.create_connector(
+        config, KVConnectorRole.SCHEDULER, make_hybrid_gdn_kv_cache_config(16)
+    )
+    request = create_request(num_tokens=prompt_len, do_remote_decode=True)
+    tokens = list(request.prompt_token_ids)
+    connector.on_new_request(request)
+    stop = max(0, prompt_len - 3)
+    assert request.prefill_stop_tokens == (stop or None)
+    assert (
+        connector.connector_scheduler._get_remote_prefill_token_count(prompt_len)
+        == stop
+    )
+    assert request.prompt_token_ids == list(request.all_token_ids) == tokens
+    # Root MultiConnector mode overrides a child's independent capability.
+    connector.set_lookahead_block_hashes(False)
+    assert not connector.connector_scheduler.use_lookahead_block_hashes

@@ -500,7 +500,9 @@ class Scheduler(SchedulerInterface):
         )
         # Split only during prefill: `request.num_tokens - 1` extends this to
         # resumed requests replaying their output tokens.
-        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        prefill_end = request.prefill_stop_tokens or max(
+            request.num_prompt_tokens, request.num_tokens - 1
+        )
         if start >= prefill_end:
             return num_new_tokens
 
@@ -768,6 +770,11 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+            if request.prefill_stop_tokens is not None:
+                num_new_tokens = min(
+                    num_new_tokens,
+                    request.prefill_stop_tokens - request.num_computed_tokens,
+                )
             if 0 < long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(
@@ -1189,7 +1196,9 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
-                    num_new_tokens = request.num_tokens - num_computed_tokens
+                    num_new_tokens = (
+                        request.prefill_stop_tokens or request.num_tokens
+                    ) - num_computed_tokens
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
@@ -1197,6 +1206,7 @@ class Scheduler(SchedulerInterface):
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
+                        and request.prefill_stop_tokens is None
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
@@ -1557,6 +1567,9 @@ class Scheduler(SchedulerInterface):
                 req_ids=block_state_req_ids,
                 resolve_block_ids=self.kv_cache_manager.get_block_ids,
                 boundary_state_offloads=boundary_state_offloads,
+                resolve_computed_block_ids=(
+                    self.kv_cache_manager.get_block_ids_for_computed_tokens
+                ),
             )
 
         kv_cache_block_copies, cow_retained_blocks = (
@@ -2263,6 +2276,14 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
+            elif (
+                request.prefill_stop_tokens is not None
+                and not output_is_stale
+                and request.num_computed_tokens - request.num_in_flight_tokens
+                >= request.prefill_stop_tokens
+            ):
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                stopped = True
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED

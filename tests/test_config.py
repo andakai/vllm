@@ -3619,7 +3619,7 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
         pytest.param(
             {"disable_lookahead_block_hashes": True}, False, id="disabled-by-config"
         ),
-        pytest.param({"kv_connector": "NixlConnector"}, False, id="pd-connector"),
+        pytest.param({"kv_connector": "NixlConnector"}, True, id="pd-connector"),
         pytest.param({"kv_connector": "OffloadingConnector"}, True, id="offloading"),
         pytest.param(
             {"kv_connector": "ExampleConnector"}, False, id="legacy-connector"

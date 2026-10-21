@@ -80,6 +80,18 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     _cache_hit_source = CacheHitSource.P2P
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
+        for component in (self.connector_scheduler, self.connector_worker):
+            if component is not None:
+                component.use_lookahead_block_hashes = enabled
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True

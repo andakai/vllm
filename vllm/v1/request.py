@@ -101,6 +101,8 @@ class Request:
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
 
+        # Stop target prefill here while retaining the full prompt for the drafter.
+        self.prefill_stop_tokens: int | None = None
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.

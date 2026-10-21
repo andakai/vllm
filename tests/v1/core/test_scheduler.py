@@ -8095,3 +8095,82 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+@pytest.mark.parametrize(
+    "connector_name", ["NixlConnector", "NixlPushConnector", "MooncakeConnector"]
+)
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("lookahead", [1, 3])
+def test_pd_prefill_keeps_known_suffix_until_target_stops(
+    connector_name, async_scheduling, lookahead
+):
+    from dataclasses import replace
+
+    from tests.v1.kv_connector.unit.test_mooncake_connector_hybrid_mamba import (
+        make_hybrid_gdn_kv_cache_config,
+    )
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler as create_connector_scheduler,
+    )
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+
+    config = create_vllm_config(
+        kv_connector=connector_name,
+        kv_role="kv_producer",
+        max_num_batched_tokens=16,
+        num_speculative_tokens=lookahead,
+    )
+    config.speculative_config.method = "mtp"
+    config.speculative_config.draft_model_config = config.model_config
+    config.model_config.hf_config.num_nextn_predict_layers = lookahead
+    config.scheduler_config.async_scheduling = async_scheduling
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.cache_config.mamba_cache_mode = "align"
+    cache_config = make_hybrid_gdn_kv_cache_config(16)
+    mamba_group = cache_config.kv_cache_groups[1]
+    mamba_group.kv_cache_spec = replace(
+        mamba_group.kv_cache_spec, mamba_cache_mode="align"
+    )
+    scheduler = create_connector_scheduler(
+        config, kv_cache_config=cache_config, hash_block_size=16
+    )
+    init_none_hash(sha256)
+    tokens = list(range(32 + lookahead))
+    request = Request(
+        request_id="pd-known-tail",
+        prompt_token_ids=tokens.copy(),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256, lookahead),
+    )
+    hashes = request.block_hashes.copy()
+    request.kv_transfer_params = {"do_remote_decode": True}
+    scheduler.add_request(request)
+    assert request.prefill_stop_tokens == 32
+    assert (
+        scheduler.connector.connector_scheduler._get_remote_prefill_token_count(
+            len(tokens)
+        )
+        == 32
+    )
+    for end in (16, 32):
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens == {request.request_id: 16}
+        if output.scheduled_new_reqs:
+            assert output.scheduled_new_reqs[0].prompt_token_ids == tokens
+        assert request.num_computed_tokens == end
+        assert not request.is_finished()
+        # The worker is still prefilling: it supplies known suffix tokens to
+        # the drafter and produces no sampled output.
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id], req_id_to_index={request.request_id: 0}
+            ),
+        )
+        assert request.is_finished() == (end == 32)
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request.num_output_tokens == 0
+    assert list(request.all_token_ids) == tokens
+    assert request.block_hashes == hashes

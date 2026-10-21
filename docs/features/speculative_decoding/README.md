@@ -115,7 +115,8 @@ prefill lookahead tokens after each block. This lets matching requests reuse the
 trailing block without the legacy EAGLE block drop. A block becomes hashable only
 after its lookahead tokens are available.
 
-Lookahead hashing supports OffloadingConnector and MooncakeStoreConnector.
+Lookahead hashing supports OffloadingConnector, MooncakeStoreConnector, NIXL,
+and Mooncake P/D.
 MultiConnector enables it only when every child supports it.
 Other connectors, KV cache events, and HiSparse keep legacy hashes. Engines sharing
 a content-addressed store must use the same hash mode and prefill lookahead length;
@@ -123,6 +124,11 @@ otherwise their cache entries will not match. Set `"disable_lookahead_block_hash
 `--speculative-config` to select the legacy behavior explicitly. Synchronous
 scheduling can still miss caching a final block whose hash becomes available only
 with the last output; output-time cache registration is unchanged.
+
+With lookahead hashing, P/D keeps the full prompt available to the drafter while
+the prefiller stops before the known lookahead suffix. The decoder computes that
+suffix locally. Prompts no longer than the lookahead are recomputed on the decoder.
+Both P/D engines must use the same lookahead hash mode and length.
 
 ### Method-specific keys
 

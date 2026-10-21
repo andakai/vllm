@@ -616,6 +616,7 @@ class NixlBaseConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
+        self.use_lookahead_block_hashes = vllm_config.use_lookahead_block_hashes
 
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
@@ -1509,6 +1510,11 @@ class NixlBaseConnectorWorker:
             self.vllm_config,
             backend_name,
             transfer_mode=self._TRANSFER_MODE,
+            lookahead_prefill_tokens=(
+                self.vllm_config.num_prefill_lookahead_tokens
+                if self.use_lookahead_block_hashes
+                else 0
+            ),
         )
 
         if self._is_csa_linear and self.use_host_buffer:

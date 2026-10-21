@@ -221,6 +221,10 @@ class KVConnectorBlockState:
     resolve_block_ids: Callable[[str], tuple[list[int], ...]]
     # Exact Mamba "align" boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
+    # Exclude speculative reservations when saving a completed prefix.
+    resolve_computed_block_ids: Callable[[str, int], tuple[list[int], ...]] | None = (
+        None
+    )
 
     def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
         if req_id not in self.req_ids:
