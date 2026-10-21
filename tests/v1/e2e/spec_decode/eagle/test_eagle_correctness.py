@@ -26,6 +26,7 @@ def test_qwen3_eagle3_padded_chunk_inputs(monkeypatch, vllm_runner):
         max_num_batched_tokens=64,
         max_num_seqs=1,
         enable_prefix_caching=False,
+        enable_chunked_prefill=True,
         async_scheduling=False,
         speculative_config={
             "method": "eagle3",
