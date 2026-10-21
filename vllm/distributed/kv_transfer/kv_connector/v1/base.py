@@ -688,6 +688,13 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @classmethod
+    def supports_eagle_boundary_keys(cls, vllm_config: "VllmConfig") -> bool:
+        """Whether this connector stays consistent with EAGLE boundary keys on
+        hybrid Mamba models, whose cache placement then stops backing off for
+        the EAGLE drop (``CacheConfig.eagle_boundary_tokens``)."""
+        return False
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """Get the required KV cache layout for this connector.
 

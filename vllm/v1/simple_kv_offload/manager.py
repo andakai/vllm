@@ -320,6 +320,8 @@ class SimpleCPUOffloadScheduler:
             gpu_config,
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,
+            # CPU hits keep the EAGLE drop.
+            eagle_boundary_tokens=0,
         )
 
     @staticmethod

@@ -14,7 +14,13 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.kv_cache_utils import (
+    BoundaryKeysFn,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    get_boundary_keys,
+    trim_null_head,
+)
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -295,7 +301,9 @@ class KVCacheManager:
         max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
+                request.block_hashes,
+                max_cache_hit_length,
+                self._boundary_keys_fn(request),
             )
         )
 
@@ -319,6 +327,20 @@ class KVCacheManager:
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
+
+    def _boundary_keys_fn(self, request: Request) -> BoundaryKeysFn | None:
+        num_tokens = self.coordinator.eagle_boundary_tokens
+        if not num_tokens:
+            return None
+        return lambda start: get_boundary_keys(request, start, num_tokens)
+
+    def record_boundary_keys(self, request: Request) -> None:
+        """Record EAGLE boundary keys of cached blocks that the request's newly
+        appended tokens make known (see ``CacheConfig.eagle_boundary_tokens``).
+        """
+        for manager in self.coordinator.single_type_managers:
+            if manager.eagle_boundary_tokens:
+                manager.record_boundary_keys(request)
 
     def get_computed_blocks_for_connector(
         self, request: Request
@@ -355,7 +377,9 @@ class KVCacheManager:
 
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes,
+            request.num_tokens - 1,
+            self._boundary_keys_fn(request),
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its

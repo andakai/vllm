@@ -350,6 +350,10 @@ class CacheConfig:
     cache_hit_alignment_tokens: int | None = field(default=None, init=False)
     """Token granularity at which prefix-cache hits land: `hash_block_size`
     with partial hash hits, otherwise the scheduler block size."""
+    eagle_boundary_tokens: int = field(default=0, init=False)
+    """Tokens past a cached block that its EAGLE draft KV depends on, recorded
+    per block so a hit keeps its last block when they match. 0 means the last
+    block is always dropped. Resolved by the engine core."""
 
     kv_sharing_fast_prefill: bool = False
     """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
@@ -420,6 +424,7 @@ class CacheConfig:
             "kv_cache_max_concurrency",
             "hash_block_size",
             "cache_hit_alignment_tokens",
+            "eagle_boundary_tokens",
             # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
             "swa_bounded_replay",

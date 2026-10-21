@@ -639,6 +639,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return any(c.has_pending_push_work() for c in self._connectors)
 
     @classmethod
+    def supports_eagle_boundary_keys(cls, vllm_config: "VllmConfig") -> bool:
+        return all(
+            connector_cls.supports_eagle_boundary_keys(config)
+            for connector_cls, config in cls._get_connector_classes_and_configs(
+                vllm_config
+            )
+        )
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """Get the required KV cache layout for this connector.
 

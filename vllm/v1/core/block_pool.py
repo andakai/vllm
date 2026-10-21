@@ -70,6 +70,15 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
         return None
 
+    def get_blocks(self, key: BlockHashWithGroupId) -> Iterable[KVCacheBlock]:
+        """Gets all blocks with the given block hash key."""
+        blocks = self._cache.get(key)
+        if blocks is None:
+            return ()
+        if isinstance(blocks, KVCacheBlock):
+            return (blocks,)
+        return blocks.values()
+
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
         """Checks whether the key maps to the given block ID."""
         blocks = self._cache.get(key)
@@ -222,6 +231,27 @@ class BlockPool:
                 return None
             cached_blocks.append(block)
         return cached_blocks
+
+    def get_proven_blocks(
+        self,
+        block_hash: BlockHash,
+        kv_cache_group_ids: list[int],
+        num_tokens: int,
+        boundary_keys: tuple[Any, ...],
+    ) -> list[KVCacheBlock] | None:
+        """Like ``get_cached_block`` for the ``num_tokens``-prefix
+        ``block_hash``, but only blocks whose writer read ``boundary_keys``
+        right after it (``KVCacheBlock.boundary_keys``)."""
+        proven_blocks = []
+        for group_id in kv_cache_group_ids:
+            key = make_block_hash_with_group_id(block_hash, group_id)
+            for block in self.cached_block_hash_to_block.get_blocks(key):
+                if (block.boundary_keys or {}).get(num_tokens) == boundary_keys:
+                    proven_blocks.append(block)
+                    break
+            else:
+                return None
+        return proven_blocks
 
     def cache_full_blocks(
         self,
@@ -659,9 +689,11 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        boundary_keys = src_block.boundary_keys
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+        dst_block.boundary_keys = boundary_keys
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.

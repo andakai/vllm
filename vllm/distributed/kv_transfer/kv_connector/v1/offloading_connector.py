@@ -233,6 +233,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.take_events()
 
     @classmethod
+    def supports_eagle_boundary_keys(cls, vllm_config: VllmConfig) -> bool:
+        return True
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         if vllm_config.attention_config.hisparse_config is not None:
             return "BLHNC"

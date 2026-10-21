@@ -146,6 +146,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         return False
 
     @classmethod
+    def supports_eagle_boundary_keys(cls, vllm_config: VllmConfig) -> bool:
+        # P/D transfers a request's own blocks, independent of cache placement.
+        return True
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
         if vllm_config.model_config is None:
             logger.warning_once(

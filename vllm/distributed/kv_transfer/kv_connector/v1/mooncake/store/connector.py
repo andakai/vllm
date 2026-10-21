@@ -131,6 +131,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         return False
 
+    @classmethod
+    def supports_eagle_boundary_keys(cls, vllm_config: VllmConfig) -> bool:
+        return True
+
     @staticmethod
     def _validate_kv_cache_config(
         vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
@@ -271,6 +275,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.register_finished_boundary_save(request, block_ids)
         return False, None
 
     def register_finished_partial_tail(

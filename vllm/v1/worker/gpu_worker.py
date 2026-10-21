@@ -869,6 +869,7 @@ class Worker(WorkerBase):
         self.cache_config.cache_hit_alignment_tokens = (
             kv_cache_config.cache_hit_alignment_tokens
         )
+        self.cache_config.eagle_boundary_tokens = kv_cache_config.eagle_boundary_tokens
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.

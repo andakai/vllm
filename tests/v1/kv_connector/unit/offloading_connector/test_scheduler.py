@@ -42,6 +42,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     KVCacheBlockCopy,
+    get_boundary_block_hash,
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
@@ -3552,6 +3553,58 @@ class TestEagle:
         )
         # 3 hits, pop to 2 → 2 * block_size = 8 tokens loadable
         assert sched._lookup(req_status) == 8
+
+    @staticmethod
+    def _boundary_keyed_runner(request_runner):
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        return request_runner(
+            block_size=4,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+            eagle_boundary_tokens=1,
+        )
+
+    def test_boundary_keyed_lookup_keeps_last_block(self, request_runner):
+        """Chunks keyed by their boundary tokens need no EAGLE pop."""
+        runner = self._boundary_keyed_runner(request_runner)
+        runner.manager.lookup.return_value = LookupResult.HIT
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched, num_tokens=12, offload_keys_per_group=[[1, 2]]
+        )
+        assert sched._lookup(req_status) == 8
+
+    def test_boundary_keyed_offload_keys_wait_for_next_token(self, request_runner):
+        """A draft chunk's offload key covers the token its draft KV read."""
+        runner = self._boundary_keyed_runner(request_runner)
+        req_status = self._make_req_status(
+            runner.connector_scheduler, num_tokens=8, offload_keys_per_group=[[]]
+        )
+        req = req_status.req
+        req.prompt_embeds = None
+        req.mm_features = []
+        req.block_hashes = [BlockHash(b"0"), BlockHash(b"1")]
+
+        # The chunk ending at the last token waits for the token after it.
+        req_status.update_offload_keys()
+        assert req_status.group_states[0].offload_keys == [
+            make_offload_key(get_boundary_block_hash(BlockHash(b"0"), (4,)), 0)
+        ]
+        req.num_tokens = 9
+        req.all_token_ids = [0, 1, 2, 3, 4, 5, 6, 7, 99]
+        req_status.update_offload_keys()
+        assert req_status.group_states[0].offload_keys[1] == make_offload_key(
+            get_boundary_block_hash(BlockHash(b"1"), (99,)), 0
+        )
 
     def test_full_attn_lookup_single_block_returns_zero(self, request_runner):
         """Full-attn eagle group with 1 block hit → pop to 0 → returns 0."""

@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import get_boundary_block_hash, get_boundary_keys
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
@@ -106,6 +107,9 @@ class GroupOffloadConfig(NamedTuple):
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
+    # EAGLE boundary keys: draft chunks are keyed by the next tokens their
+    # draft KV read, so they need no trailing drop (is_eagle_group is False).
+    boundary_tokens: int = 0
 
     def load_window_size_in_chunks(self, num_tokens: int) -> int | None:
         window = self.sliding_window_size_in_chunks
@@ -250,7 +254,8 @@ class SchedulerOffloadConfig(NamedTuple):
                 "all groups as non-draft for offloading."
             )
 
-        if eagle_groups:
+        boundary_tokens = kv_cache_config.eagle_boundary_tokens
+        if eagle_groups and not boundary_tokens:
             logger.info(
                 "KV offloading: EAGLE/MTP draft attention groups %s "
                 "detected. The trailing chunk of these groups will be "
@@ -284,7 +289,8 @@ class SchedulerOffloadConfig(NamedTuple):
                     kv_cache_spec=kv_spec,
                     manager_cls=manager_cls,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
-                    is_eagle_group=group_id in eagle_groups,
+                    is_eagle_group=group_id in eagle_groups and not boundary_tokens,
+                    boundary_tokens=boundary_tokens if group_id in eagle_groups else 0,
                     requires_cow_source=(
                         isinstance(kv_spec, MambaSpec)
                         and kv_spec.mamba_cache_mode == "align"
@@ -310,7 +316,10 @@ class SchedulerOffloadConfig(NamedTuple):
                 or config.requires_cow_source
                 for config in kv_group_configs
             )
-            and not any(config.is_eagle_group for config in kv_group_configs)
+            and not any(
+                config.is_eagle_group or config.boundary_tokens
+                for config in kv_group_configs
+            )
             and vllm_config.parallel_config.decode_context_parallel_size == 1
         )
 
@@ -429,12 +438,19 @@ class RequestOffloadState:
                 None,
                 group_config.hashes_per_chunk,
             ):
+                end = (
+                    len(group_state.offload_keys) + 1
+                ) * group_config.tokens_per_chunk
+                if group_config.boundary_tokens:
+                    keys = get_boundary_keys(
+                        self.req, end, group_config.boundary_tokens
+                    )
+                    if keys is None:
+                        break
+                    req_block_hash = get_boundary_block_hash(req_block_hash, keys)
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
-                self.req_context.set_offload_key_position(
-                    key,
-                    len(group_state.offload_keys) * group_config.tokens_per_chunk,
-                )
+                self.req_context.set_offload_key_position(key, end)
 
     def update_block_id_groups(
         self, new_block_id_groups: tuple[list[int], ...] | None
@@ -870,7 +886,8 @@ class OffloadingConnectorScheduler:
                 tokens_per_chunk = group_config.tokens_per_chunk
                 offload_keys = group_state.offload_keys
 
-                assert (
+                # Boundary-keyed chunks lag until their next tokens are known.
+                assert group_config.boundary_tokens or (
                     len(offload_keys) >= req_status.req.num_tokens // tokens_per_chunk
                 )
 

@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, get_boundary_block_hash
 from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -42,6 +42,7 @@ def _make_bare_scheduler(
     enable_partial_hash_hits: bool = False,
     kv_role: str = "kv_both",
     save_decode_cache: bool = False,
+    boundary_tokens: int = 0,
 ) -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = kv_role
@@ -61,6 +62,9 @@ def _make_bare_scheduler(
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
     scheduler._finished_partial_tail_metas = {}
+    scheduler._boundary_tokens = boundary_tokens
+    scheduler._boundary_hashes = {}
+    scheduler._finished_boundary_save_metas = {}
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
@@ -1765,3 +1769,67 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
+
+
+def _add_boundary_keyed_request(scheduler: MooncakeStoreScheduler) -> SimpleNamespace:
+    """A 32-token prompt whose last unit waits for the first sampled token."""
+    request = SimpleNamespace(
+        request_id="req-0",
+        all_token_ids=list(range(32)),
+        num_tokens=32,
+        num_computed_tokens=32,
+        num_prompt_tokens=32,
+        block_hashes=[b"h0", b"h1"],
+        num_output_placeholders=0,
+        prompt_embeds=None,
+        mm_features=[],
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=32,
+        allocated_block_ids=([0, 1],),
+        num_saved_tokens=16,
+        prefill_end_tokens=32,
+    )
+    return request
+
+
+def _sample(request: SimpleNamespace, token_id: int) -> None:
+    request.all_token_ids.append(token_id)
+    request.num_tokens += 1
+
+
+def test_boundary_store_keys_cover_next_token():
+    scheduler = _make_bare_scheduler(boundary_tokens=1)
+    request = _add_boundary_keyed_request(scheduler)
+
+    assert scheduler._block_hashes(request) == [get_boundary_block_hash(b"h0", (16,))]
+    _sample(request, 99)
+    assert scheduler._block_hashes(request)[1] == get_boundary_block_hash(b"h1", (99,))
+
+
+def test_boundary_prompt_tail_saved_once_first_token_is_sampled():
+    scheduler = _make_bare_scheduler(boundary_tokens=1)
+    request = _add_boundary_keyed_request(scheduler)
+    _sample(request, 99)
+
+    meta = scheduler.build_connector_meta(
+        _make_decode_scheduler_output(num_computed_tokens=32)
+    )
+
+    assert [m.token_len_chunk for m in meta.requests] == [32]
+    assert len(meta.requests[0].block_hashes) == 2
+
+
+def test_boundary_finish_saves_unit_keyed_by_last_token():
+    scheduler = _make_bare_scheduler(boundary_tokens=1)
+    request = _add_boundary_keyed_request(scheduler)
+    _sample(request, 99)
+
+    scheduler.register_finished_boundary_save(request, ([3, 4],))
+
+    req_meta = scheduler._finished_boundary_save_metas["req-0"]
+    assert req_meta.token_len_chunk == 32
+    assert req_meta.block_ids == ([3, 4],)
+    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [3, 4]

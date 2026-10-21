@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -14,7 +14,9 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
+    BoundaryKeysFn,
     KVCacheBlock,
+    get_boundary_keys,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -52,6 +54,9 @@ class SingleTypeKVCacheManager(ABC):
     """
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+    # Whether ``find_longest_cache_hit`` takes ``boundary_keys`` to keep the
+    # EAGLE last block (see ``CacheConfig.eagle_boundary_tokens``).
+    supports_eagle_boundary_proof: ClassVar[bool] = False
 
     # Keep this group's longer prefix until external cache lookup completes.
     retains_longer_hit: bool = False
@@ -139,6 +144,12 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
+        # Set by the coordinator on EAGLE groups that record boundary keys.
+        self.eagle_boundary_tokens = 0
+        # {req_id: [(block, hash entry, entry end)]} awaiting boundary keys.
+        self._pending_boundary_keys: dict[
+            str, list[tuple[KVCacheBlock, BlockHashWithGroupId, int]]
+        ] = {}
         # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
         # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
         self.shared_prefix_checkpoint = False
@@ -539,6 +550,53 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+        if self.eagle_boundary_tokens:
+            self.track_boundary_keys(
+                request,
+                (
+                    (block, block.block_hash, block.block_hash_num_tokens)
+                    for block in self.req_to_blocks[request.request_id][
+                        num_cached_blocks:num_full_blocks
+                    ]
+                    if block.block_hash is not None
+                    and block.block_hash_num_tokens is not None
+                ),
+            )
+
+    def track_boundary_keys(
+        self,
+        request: Request,
+        entries: Iterable[tuple[KVCacheBlock, BlockHashWithGroupId, int]],
+    ) -> None:
+        """Record the boundary keys of hash entries this request just cached,
+        now or once their next tokens are appended (``record_boundary_keys``)."""
+        if request.prompt_embeds is not None:
+            return
+        self._pending_boundary_keys.setdefault(request.request_id, []).extend(entries)
+        self.record_boundary_keys(request)
+
+    def record_boundary_keys(self, request: Request) -> None:
+        """Record the boundary keys of pending blocks whose next tokens are
+        known. Must run as tokens are appended: the drafter read exactly those
+        (a streaming update may later replace the last one)."""
+        pending = self._pending_boundary_keys.get(request.request_id)
+        if not pending:
+            return
+        remaining = []
+        for block, block_hash, end in pending:
+            # Skip entries evicted or recorded since.
+            if not self.block_pool.cached_block_hash_to_block.contain(
+                block_hash, block.block_id
+            ) or end in (block.boundary_keys or {}):
+                continue
+            keys = get_boundary_keys(request, end, self.eagle_boundary_tokens)
+            if keys is None:
+                remaining.append((block, block_hash, end))
+            elif block.boundary_keys is None:
+                block.boundary_keys = {end: keys}
+            else:
+                block.boundary_keys[end] = keys
+        self._pending_boundary_keys[request.request_id] = remaining
 
     @classmethod
     def reachable_block_mask(
@@ -585,6 +643,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
+        self._pending_boundary_keys.pop(request_id, None)
         return trim_null_head(req_blocks)
 
     def free(self, request_id: str) -> None:
@@ -737,6 +796,7 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    supports_eagle_boundary_proof: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(
@@ -750,7 +810,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        boundary_keys: BoundaryKeysFn | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """See ``SingleTypeKVCacheManager.find_longest_cache_hit``.
+
+        ``boundary_keys`` maps a hit length to the request's boundary keys there
+        (``get_boundary_keys``). If given, an EAGLE hit keeps its last block
+        when a cached copy's writer read the same keys.
+        """
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
@@ -821,16 +888,38 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 hit_length = (fine_idx + 1) * alignment_tokens
                 break
 
-        # Eagle needs the tokens right before the generation point recomputed:
-        # drop one hash unit when fine-grained (the tail block's KV is
-        # append-only, so it still covers the reduced length), else one cache
-        # block.
+        # Eagle draft KV at the hit's end depends on the cache writer's next
+        # token, which the hash does not cover. Recompute it: drop one hash unit
+        # when fine-grained (the tail block's KV is append-only, so it still
+        # covers the reduced length), else one cache block.
+        aligned_length = hit_length - hit_length % alignment_tokens
         if drop_eagle_block and hit_length > 0:
             hit_length -= min(alignment_tokens, block_size)
         # Round down to the alignment; a no-op when fine-grained (hits land on
         # hash boundaries by construction) and when alignment_tokens ==
-        # block_size. Then trim blocks past the new tail.
+        # block_size.
         hit_length -= hit_length % alignment_tokens
+        # Keep the dropped tail if each group caches a copy of its last block
+        # whose writer read this request's next token.
+        if (
+            boundary_keys is not None
+            and aligned_length > hit_length
+            and (keys := boundary_keys(aligned_length)) is not None
+        ):
+            tail_hash = (
+                block_hashes[aligned_length // alignment_tokens - 1]
+                if fine_grained
+                else full_block_hashes[aligned_length // block_size - 1]
+            )
+            tails = block_pool.get_proven_blocks(
+                tail_hash, kv_cache_group_ids, aligned_length, keys
+            )
+            if tails is not None:
+                tail_idx = cdiv(aligned_length, block_size) - 1
+                for computed, tail in zip(computed_blocks, tails):
+                    computed[tail_idx] = tail
+                hit_length = aligned_length
+        # Trim blocks past the new tail.
         num_blocks = cdiv(hit_length, block_size)
         for computed in computed_blocks:
             del computed[num_blocks:]
@@ -884,13 +973,17 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_idx = boundary_tokens // self.block_size
         if block_idx >= len(blocks):
             return
-        self.block_pool.cache_partial_block(
+        key = self.block_pool.cache_partial_block(
             request=request,
             block=blocks[block_idx],
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+        if self.eagle_boundary_tokens and key is not None:
+            self.track_boundary_keys(
+                request, ((blocks[block_idx], key, boundary_tokens),)
+            )
 
 
 class RSWAManager(FullAttentionManager):
@@ -1183,6 +1276,7 @@ class CircularBufferManager(FullAttentionManager):
     """Claims the ring's single block per request; prefix caching disabled."""
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+    supports_eagle_boundary_proof: ClassVar[bool] = False
 
     def _claim_ring_block(
         self, request_id: str, record_for_zeroing: bool = True
@@ -1235,6 +1329,7 @@ class CircularBufferManager(FullAttentionManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        boundary_keys: BoundaryKeysFn | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         return tuple([] for _ in kv_cache_group_ids), 0
 
@@ -2216,6 +2311,7 @@ class HiSparseSourceManager(FullAttentionManager):
     back it, so each GPU-resident page can be written back and later reclaimed.
     """
 
+    supports_eagle_boundary_proof: ClassVar[bool] = False
     coordinator: "HiSparseCoordinator | None" = None
     # The host tier keeps prefixes the device groups have already lost.
     retains_longer_hit = True

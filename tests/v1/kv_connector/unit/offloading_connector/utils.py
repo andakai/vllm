@@ -186,6 +186,7 @@ class RequestRunner:
         worker_count: int = 1,
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
+        eagle_boundary_tokens: int = 0,
     ):
         assert blocks_per_chunk == 1 or kv_cache_groups is None, (
             "blocks_per_chunk > 1 requires all groups to have the same "
@@ -269,6 +270,7 @@ class RequestRunner:
             num_blocks=num_gpu_blocks,
             kv_cache_tensors=kv_cache_tensors,
             kv_cache_groups=kv_cache_groups,
+            eagle_boundary_tokens=eagle_boundary_tokens,
         )
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
@@ -693,6 +695,7 @@ def request_runner():
         worker_count=1,
         retention_interval=None,
         speculative_config=None,
+        eagle_boundary_tokens=0,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -704,6 +707,7 @@ def request_runner():
             worker_count=worker_count,
             retention_interval=retention_interval,
             speculative_config=speculative_config,
+            eagle_boundary_tokens=eagle_boundary_tokens,
         )
         runners.append(runner)
         return runner
