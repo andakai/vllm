@@ -115,8 +115,11 @@ prefill lookahead tokens after each block. This lets matching requests reuse the
 trailing block without the legacy EAGLE block drop. A block becomes hashable only
 after its lookahead tokens are available.
 
-Lookahead hashing is currently disabled when using KV connectors, KV cache events,
-or HiSparse. Set `"disable_lookahead_block_hashes": true` in
+Lookahead hashing supports OffloadingConnector and MooncakeStoreConnector.
+MultiConnector enables it only when every child supports it.
+Other connectors, KV cache events, and HiSparse keep legacy hashes. Engines sharing
+a content-addressed store must use the same hash mode and prefill lookahead length;
+otherwise their cache entries will not match. Set `"disable_lookahead_block_hashes": true` in
 `--speculative-config` to select the legacy behavior explicitly. Synchronous
 scheduling can still miss caching a final block whose hash becomes available only
 with the last output; output-time cache registration is unchanged.

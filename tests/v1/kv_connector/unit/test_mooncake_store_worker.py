@@ -319,6 +319,8 @@ def _make_vllm_config(
     )
     cache_config.get_resolved_kv_cache_layout = lambda: kv_cache_layout
     return SimpleNamespace(
+        use_lookahead_block_hashes=False,
+        num_prefill_lookahead_tokens=0,
         model_config=_FakeModelConfig(),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=pipeline_parallel_size,
@@ -1550,6 +1552,7 @@ def test_snapshot_offload_skips_null_handoff_block():
 def test_worker_meta_is_absent_before_any_completed_job():
     send_thread = _make_partial_tail_send_thread(MagicMock())
     store_worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
+    store_worker.use_lookahead_block_hashes = False
     store_worker.kv_send_thread = send_thread
 
     assert store_worker.build_connector_worker_meta() is None
@@ -1589,7 +1592,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     )
     coord = SimpleNamespace(
         lcm_block_size=16,
-        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
+        store_mask=lambda token_len, start_token, num_prompt_tokens=None, **kwargs: (
             None,
             [True, False],
         ),
@@ -1635,7 +1638,9 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
 
     assert full_hashes == [b"a2".hex(), b"a3".hex()]
     assert masked_hashes == [b"a2".hex()]
-    coord.store_mask.assert_called_once_with(64, 32, num_prompt_tokens=64)
+    coord.store_mask.assert_called_once_with(
+        64, 32, num_prompt_tokens=64, apply_eagle=True
+    )
 
 
 def test_store_sending_thread_prepares_missing_chunks_once_per_group():
@@ -1644,7 +1649,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
     store.batch_put_from_multi_buffers.return_value = [256, 256, 512, 512]
     coord = SimpleNamespace(
         lcm_block_size=16,
-        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
+        store_mask=lambda token_len, start_token, num_prompt_tokens=None, **kwargs: (
             None,
             None,
         ),
@@ -2702,6 +2707,7 @@ def test_tp_sharded_layout_rejects_full_attention_subclasses():
         rswa_window=32,
     )
     store_worker = object.__new__(worker.MooncakeStoreWorker)
+    store_worker.use_lookahead_block_hashes = False
     store_worker.pcp_size = 1
     store_worker.dcp_size = 1
     store_worker._kv_cache_groups = [SimpleNamespace(kv_cache_spec=spec)]
@@ -3704,6 +3710,7 @@ def _make_bare_worker(
     MooncakeDistributedStore.
     """
     worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
+    worker.use_lookahead_block_hashes = False
     worker.cache_config = MagicMock()
     worker.cache_config.num_gpu_blocks = num_gpu_blocks
     worker.store = MagicMock()
@@ -3812,6 +3819,8 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         ),
     ]
     config = SimpleNamespace(
+        use_lookahead_block_hashes=False,
+        num_prefill_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
@@ -3885,6 +3894,8 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
         ),
     ]
     config = SimpleNamespace(
+        use_lookahead_block_hashes=False,
+        num_prefill_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}

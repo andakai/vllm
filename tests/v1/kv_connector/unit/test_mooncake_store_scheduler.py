@@ -47,6 +47,7 @@ def _make_bare_scheduler(
     scheduler.kv_role = kv_role
     scheduler.save_decode_cache = save_decode_cache
     scheduler.enable_kv_events = False
+    scheduler.use_lookahead_block_hashes = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
     scheduler._capacity_only = False
@@ -61,6 +62,7 @@ def _make_bare_scheduler(
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
     scheduler._finished_partial_tail_metas = {}
+    scheduler._finished_lookahead_save_metas = {}
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
@@ -301,6 +303,8 @@ def _make_qsa_hybrid_cache_config():
 
 def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     vllm_config = SimpleNamespace(
+        use_lookahead_block_hashes=False,
+        num_prefill_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
@@ -1765,3 +1769,99 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
+
+
+@pytest.mark.parametrize(
+    "lookahead, computed, expected",
+    [(1, 0, 0), (1, 16, 16), (1, 32, 32), (3, 16, 0), (3, 32, 16)],
+)
+def test_lookahead_finish_save_pins_only_completed_prefix(
+    lookahead, computed, expected
+):
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+    from vllm.v1.outputs import KVConnectorOutput
+    from vllm.v1.request import Request
+
+    config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        num_speculative_tokens=lookahead,
+    )
+    config.speculative_config.method = "mtp"
+    config.speculative_config.draft_model_config = config.model_config
+    config.model_config.hf_config.num_nextn_predict_layers = lookahead
+    assert config.num_prefill_lookahead_tokens == lookahead
+    cache = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler.LookupKeyClient"
+    ):
+        scheduler = MooncakeStoreScheduler(config, cache)
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=16)
+    scheduler.bind_gpu_block_pool(pool)
+    blocks = pool.get_new_blocks(2)
+    block_ids = ([block.block_id for block in blocks],)
+    init_none_hash(sha256)
+    request = Request(
+        request_id="finish",
+        prompt_token_ids=list(range(32)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256, lookahead),
+    )
+    request.append_output_token_ids(list(range(32, 32 + lookahead)))
+    request.num_computed_tokens = computed
+    scheduler._request_trackers[request.request_id] = RequestTracker(
+        req_id=request.request_id,
+        token_len=32,
+        allocated_block_ids=block_ids,
+        num_saved_tokens=0,
+        prefill_end_tokens=32,
+    )
+    scheduler.register_finished_lookahead_save(request, block_ids)
+    pool.free_blocks(blocks)
+    if not expected:
+        assert not scheduler._finished_lookahead_save_metas
+        assert all(block.ref_cnt == 0 for block in blocks)
+        return
+    meta = scheduler._finished_lookahead_save_metas[request.request_id]
+    assert meta.token_len_chunk == expected
+    assert all(block.ref_cnt == 1 for block in blocks)
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                completed_saves={meta.store_job_id: 1},
+            ),
+        )
+    )
+    assert all(block.ref_cnt == 0 for block in blocks)
+
+
+def test_lookahead_save_boundary_does_not_advance_past_hashes():
+    tracker = RequestTracker(
+        req_id="bounded",
+        token_len=48,
+        allocated_block_ids=([1, 2, 3],),
+        num_saved_tokens=0,
+    )
+    assert ReqMeta.from_request_tracker(tracker, 16, max_save_tokens=0) is None
+    assert tracker.num_saved_tokens == 0
+    meta = ReqMeta.from_request_tracker(tracker, 16, max_save_tokens=31)
+    assert meta.token_len_chunk == tracker.num_saved_tokens == 16

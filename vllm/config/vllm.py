@@ -684,9 +684,18 @@ class VllmConfig:
         # HiSparse is not validated with lookahead hashes.
         if self.attention_config.hisparse_config is not None:
             return False
-        # KV connectors keep the legacy hashes.
         if self.kv_transfer_config is not None:
-            return False
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(
+                self.kv_transfer_config
+            )
+            if not connector_cls.supports_lookahead_block_hashes(
+                self.kv_transfer_config
+            ):
+                return False
         # KV events retain their existing hash format.
         if (
             self.kv_events_config is not None

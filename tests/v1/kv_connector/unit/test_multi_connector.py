@@ -1294,3 +1294,48 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             assert mc._all_support_hma is False
         finally:
             llm.llm_engine.engine_core.shutdown()
+
+
+@pytest.mark.parametrize("legacy_child", [False, True])
+def test_multiconnector_lookahead_is_engine_wide(legacy_child):
+    from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+        ExampleConnector,
+    )
+
+    class LookaheadConnector(ExampleConnector):
+        @classmethod
+        def supports_lookahead_block_hashes(cls, kv_transfer_config):
+            return True
+
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        disable_hybrid_kv_cache_manager=True,
+        num_speculative_tokens=1,
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "TestLookahead", "kv_role": "kv_both"},
+                {
+                    "kv_connector": "ExampleConnector"
+                    if legacy_child
+                    else "TestLookahead",
+                    "kv_role": "kv_both",
+                },
+            ]
+        },
+    )
+    config.speculative_config.method = "eagle3"
+    # Register only for this test, preserving the real factory and constructors.
+    with pytest.MonkeyPatch.context() as m:
+        m.setitem(
+            KVConnectorFactory._registry, "TestLookahead", lambda: LookaheadConnector
+        )
+        connector = KVConnectorFactory.create_connector(
+            config,
+            KVConnectorRole.SCHEDULER,
+            KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=[]),
+        )
+        assert config.use_lookahead_block_hashes is not legacy_child
+        assert all(
+            c.use_lookahead_block_hashes is not legacy_child
+            for c in connector.sub_connectors
+        )

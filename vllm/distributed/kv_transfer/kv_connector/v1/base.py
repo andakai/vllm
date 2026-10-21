@@ -211,6 +211,17 @@ class KVConnectorBase_V1(ABC):
         """Whether the connector can follow the KV cache remap of sleep mode."""
         return True
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether lookahead hashes are safe for this connector's loads and stores."""
+        return False
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        """Set the engine-wide hash mode, including for MultiConnector children."""
+        self.use_lookahead_block_hashes = enabled
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -230,6 +241,7 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
+        self.use_lookahead_block_hashes = vllm_config.use_lookahead_block_hashes
 
     @property
     def role(self) -> KVConnectorRole:

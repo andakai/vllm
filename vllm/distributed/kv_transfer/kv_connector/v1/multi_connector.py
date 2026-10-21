@@ -205,6 +205,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # a single connector to load.
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
+        self.set_lookahead_block_hashes(vllm_config.use_lookahead_block_hashes)
 
     @property
     def sub_connectors(self) -> list[KVConnectorBase_V1]:
@@ -219,6 +220,24 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).supports_lookahead_block_hashes(c)
+            for c in children
+        )
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
+        for connector in self._connectors:
+            connector.set_lookahead_block_hashes(enabled)
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:

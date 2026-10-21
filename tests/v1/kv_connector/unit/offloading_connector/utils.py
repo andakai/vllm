@@ -186,6 +186,7 @@ class RequestRunner:
         worker_count: int = 1,
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
+        enable_kv_cache_events: bool = True,
     ):
         assert blocks_per_chunk == 1 or kv_cache_groups is None, (
             "blocks_per_chunk > 1 requires all groups to have the same "
@@ -233,7 +234,7 @@ class RequestRunner:
             # Enable so the offloading events tracker is active, but use the
             # null publisher: these tests drain take_events directly and a
             # real ZMQ publisher would bind a port per test.
-            enable_kv_cache_events=True,
+            enable_kv_cache_events=enable_kv_cache_events,
             publisher="null",
         )
 
@@ -354,7 +355,13 @@ class RequestRunner:
         self.gpu_blocks: dict[int, GPUBlock] = {}
 
         init_none_hash(sha256)
-        self._block_hasher = get_request_block_hasher(block_size, sha256)
+        self._block_hasher = get_request_block_hasher(
+            hash_block_size,
+            sha256,
+            vllm_config.num_prefill_lookahead_tokens
+            if vllm_config.use_lookahead_block_hashes
+            else 0,
+        )
 
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},
@@ -393,6 +400,7 @@ class RequestRunner:
             req.kv_transfer_params = kv_transfer_params
 
         self.scheduler.add_request(req)
+        return req
 
     def _parse_transfers(self):
         for src_spec, dst_spec in self.offloading_spec.get_flushed_transfers():
@@ -693,6 +701,7 @@ def request_runner():
         worker_count=1,
         retention_interval=None,
         speculative_config=None,
+        enable_kv_cache_events=True,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -704,6 +713,7 @@ def request_runner():
             worker_count=worker_count,
             retention_interval=retention_interval,
             speculative_config=speculative_config,
+            enable_kv_cache_events=enable_kv_cache_events,
         )
         runners.append(runner)
         return runner
