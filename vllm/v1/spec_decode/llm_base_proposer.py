@@ -1051,6 +1051,7 @@ class SpecDecodeBaseProposer:
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
+        num_scheduled_tokens: dict[str, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """This function is used to prepare the inputs for speculative decoding.
         It calculates the next token ids and the number of valid sampled tokens
@@ -1061,9 +1062,16 @@ class SpecDecodeBaseProposer:
         # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
         for i in range(num_reqs):
-            self.backup_next_token_ids.np[i] = requests[
-                gpu_input_batch.req_ids[i]
-            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
+            req_id = gpu_input_batch.req_ids[i]
+            token_idx = gpu_input_batch.num_tokens_no_spec[i] - 1
+            if num_scheduled_tokens is not None:
+                # Use the next chunk's token without reading async placeholders.
+                token_idx = min(
+                    token_idx,
+                    gpu_input_batch.num_computed_tokens_cpu[i]
+                    + num_scheduled_tokens[req_id],
+                )
+            self.backup_next_token_ids.np[i] = requests[req_id].get_token_id(token_idx)
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
         backup_tokens_gpu = self.backup_next_token_ids.gpu
 
