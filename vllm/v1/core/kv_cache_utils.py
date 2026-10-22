@@ -953,6 +953,7 @@ def resolve_cache_hit_alignment_tokens(
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
+    num_hash_lookahead_tokens: int = 0,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -961,11 +962,15 @@ def get_request_block_hasher(
     full prefix, so each hash uniquely fingerprints the prefix ending at its
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see ``BlockHashListWithBlockSize``).
+
+    Each hash includes ``num_hash_lookahead_tokens`` beyond its block to
+    capture the trailing draft KV's token dependencies. The hash is computed
+    only when those tokens are known.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
-        num_tokens = request.num_tokens
+        num_tokens = request.num_tokens - num_hash_lookahead_tokens
 
         if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.
@@ -993,12 +998,23 @@ def get_request_block_hasher(
                 break
 
             # MM and LoRA requests need extra keys for block-hash computation.
+            hash_end_token_idx = end_token_idx + num_hash_lookahead_tokens
             extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start_token_idx, end_token_idx, curr_mm_idx
+                request,
+                start_token_idx,
+                hash_end_token_idx,
+                curr_mm_idx,
             )
 
-            # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            if num_hash_lookahead_tokens:
+                # Retain MM features that overlap the next block.
+                while curr_mm_idx > 0:
+                    mm_position = mm_features[curr_mm_idx - 1].mm_position
+                    if mm_position.offset + mm_position.length <= end_token_idx:
+                        break
+                    curr_mm_idx -= 1
+
+            block_tokens = request.all_token_ids[start_token_idx:hash_end_token_idx]
             block_hash = hash_block_tokens(
                 caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )

@@ -321,6 +321,11 @@ class Scheduler(SchedulerInterface):
                     "acceptance rates."
                 )
 
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
+        if self.num_hash_lookahead_tokens > 0:
+            # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
+            self.use_eagle_block_drop = False
+
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
@@ -332,6 +337,7 @@ class Scheduler(SchedulerInterface):
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle_block_drop,
             num_prefill_lookahead=self.num_prefill_lookahead,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
@@ -1741,7 +1747,9 @@ class Scheduler(SchedulerInterface):
             session.num_prompt_tokens : keep_end
         ]
         del session._all_token_ids[keep_end:]
-        del session.block_hashes[keep_end // self.hash_block_size :]
+        # A lookahead hash also covers the tokens after its block.
+        num_hashed_tokens = keep_end - self.num_hash_lookahead_tokens
+        del session.block_hashes[max(num_hashed_tokens, 0) // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -2250,9 +2258,19 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request status.
             if new_token_ids:
+                has_output_placeholders = request.num_output_placeholders > 0
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
+                if (
+                    not output_is_stale
+                    and status_before_stop == RequestStatus.RUNNING
+                    and (has_output_placeholders or self.num_spec_tokens > 0)
+                ):
+                    self.kv_cache_manager.cache_blocks(
+                        request,
+                        request.num_computed_tokens - request.num_in_flight_tokens,
+                    )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
@@ -2582,6 +2600,7 @@ class Scheduler(SchedulerInterface):
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
+        num_new_tokens = len(new_token_ids)
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2599,6 +2618,10 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens -= len(new_token_ids) - num_new
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
+
+        if not is_stale and request.num_output_placeholders > 0:
+            # Resolve all returned tokens, including those trimmed at a stop.
+            request.num_output_placeholders -= num_new_tokens
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:

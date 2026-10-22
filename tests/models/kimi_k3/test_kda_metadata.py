@@ -359,22 +359,31 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 
 
 @pytest.mark.parametrize(
-    ("seq_len", "disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
+    (
+        "seq_len",
+        "disable_eagle_block_drop",
+        "lookahead_hashing",
+        "prefix_match_unit",
+        "expected_offset",
+    ),
     [
-        (100, False, 16, 80),
-        (100, True, 16, 96),
-        (100, False, 8, None),
-        (96, False, 16, 80),
-        (96, True, 16, 80),
+        (100, False, False, 16, 80),
+        (100, True, False, 16, 96),
+        (100, False, True, 16, 96),
+        (100, False, False, 8, None),
+        (96, False, False, 16, 80),
+        (96, True, False, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     seq_len: int,
     disable_eagle_block_drop: bool,
+    lookahead_hashing: bool,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
+    """Lookahead hashes need no back-off from the replay boundary."""
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(
@@ -397,6 +406,9 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    speculative_config = builder.vllm_config.speculative_config
+    assert speculative_config is not None
+    speculative_config.disable_lookahead_block_hashes = not lookahead_hashing
     builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
         common_attn_metadata.block_table_tensor,
         common_attn_metadata.seq_lens,

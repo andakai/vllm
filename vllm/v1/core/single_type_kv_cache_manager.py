@@ -499,7 +499,8 @@ class SingleTypeKVCacheManager(ABC):
         if not self.kv_cache_spec.prefix_cacheable:
             return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        num_full_blocks = num_tokens // self.block_size
+        num_hashed_tokens = len(request.block_hashes) * self.block_pool.hash_block_size
+        num_full_blocks = min(num_tokens, num_hashed_tokens) // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
             return
@@ -2101,6 +2102,8 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         source_block = blocks[block_idx]
         if source_block.is_null:
+            return None
+        if source_block.block_hash_num_tokens == num_tokens:
             return None
 
         partial_hash = self.block_pool.cache_partial_block(

@@ -672,6 +672,28 @@ class VllmConfig:
         return 1
 
     @property
+    def num_hash_lookahead_tokens(self) -> int:
+        """Extra tokens covered by each block hash; 0 disables lookahead hashing."""
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.use_eagle_block_drop()
+            or speculative_config.disable_lookahead_block_hashes
+            or not self.cache_config.enable_prefix_caching
+        ):
+            return 0
+        # DFlash/DSpark context KV depends only on target hidden states.
+        if speculative_config.use_dflash() or speculative_config.use_dspark():
+            return 0
+        # HiSparse is not validated with lookahead hashes.
+        if self.attention_config.hisparse_config is not None:
+            return 0
+        # KV connectors keep the legacy hashes.
+        if self.kv_transfer_config is not None:
+            return 0
+        return self.num_prefill_lookahead_tokens
+
+    @property
     def uniform_decode_query_len(self) -> int:
         """Query length of every request in a uniform decode batch.
 

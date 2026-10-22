@@ -87,6 +87,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
+| `disable_lookahead_block_hashes` | `boolean` | `false` | Use legacy prefix-cache hashes and trailing-block dropping for EAGLE-like methods. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |

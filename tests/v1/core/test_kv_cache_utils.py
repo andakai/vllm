@@ -261,6 +261,7 @@ def make_request(
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
+    num_hash_lookahead_tokens: int = 0,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -285,7 +286,9 @@ def make_request(
         pooling_params=None,
         lora_request=None,
         cache_salt=cache_salt,
-        block_hasher=get_request_block_hasher(block_size, hash_fn),
+        block_hasher=get_request_block_hasher(
+            block_size, hash_fn, num_hash_lookahead_tokens
+        ),
         prompt_embeds=prompt_embeds,
     )
 
@@ -794,6 +797,27 @@ def test_generate_block_hash_extra_keys():
     assert next_mm_idx == 2
 
 
+@pytest.mark.parametrize("mm_offset", [3, 4])
+def test_lookahead_hash_preserves_mm_identity(mm_offset):
+    requests = [
+        make_request(
+            request_id=image,
+            prompt_token_ids=list(range(5)),
+            block_size=4,
+            mm_positions=[PlaceholderRange(offset=mm_offset, length=5 - mm_offset)],
+            mm_hashes=[image],
+            hash_fn=sha256,
+            num_hash_lookahead_tokens=1,
+        )
+        for image in ("image_a", "image_b")
+    ]
+    # Identical placeholder IDs must not hide a different lookahead image.
+    assert requests[0].block_hashes != requests[1].block_hashes
+    assert requests[0].block_hashes[0] == sha256(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2, 3, 4), (("mm", "image_a", mm_offset),))
+    )
+
+
 def test_generate_block_hash_extra_keys_no_mm_inputs():
     request = make_request(
         request_id="0",
@@ -1041,34 +1065,75 @@ def test_request_block_hasher(hash_fn):
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
-def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_fn):
+@pytest.mark.parametrize("lookahead", [0, 1, 2, 5])
+def test_request_block_hasher_incremental_append_with_multiple_mm_features(
+    hash_fn, lookahead
+):
     mm_positions = [
-        PlaceholderRange(offset=4, length=2),
-        PlaceholderRange(offset=6, length=1),
+        PlaceholderRange(offset=4, length=1),
+        PlaceholderRange(offset=5, length=2),
     ]
+    num_tokens = 7 + lookahead
     incremental = make_request(
         request_id="incremental",
-        prompt_token_ids=list(range(7)),
+        prompt_token_ids=list(range(num_tokens)),
         block_size=4,
         hash_fn=hash_fn,
         mm_positions=mm_positions,
         mm_hashes=["A", "B"],
+        num_hash_lookahead_tokens=lookahead,
     )
-    incremental.append_output_token_ids(7)
+    incremental.append_output_token_ids(num_tokens)
     fresh = make_request(
         request_id="fresh",
-        prompt_token_ids=list(range(8)),
+        prompt_token_ids=list(range(num_tokens + 1)),
         block_size=4,
         hash_fn=hash_fn,
         mm_positions=mm_positions,
         mm_hashes=["A", "B"],
+        num_hash_lookahead_tokens=lookahead,
     )
 
+    mm_keys = (("mm", "A", 0), ("mm", "B", 1))
     expected_second_hash = hash_fn(
-        (incremental.block_hashes[0], (4, 5, 6, 7), (("mm", "A", 0), ("mm", "B", 2)))
+        (incremental.block_hashes[0], tuple(range(4, 8 + lookahead)), mm_keys)
     )
     assert incremental.block_hashes[1] == expected_second_hash
     assert incremental.block_hashes == fresh.block_hashes
+
+
+def test_lookahead_hash_covers_each_module_lookahead():
+    request = make_request(
+        "request",
+        list(range(9)),
+        block_size=4,
+        hash_fn=sha256,
+        num_hash_lookahead_tokens=2,
+    )
+    # The second block's hash waits for both tokens after it.
+    assert len(request.block_hashes) == 1
+    request.append_output_token_ids(9)
+    assert request.block_hashes[1] == sha256(
+        (request.block_hashes[0], (4, 5, 6, 7, 8, 9), None)
+    )
+
+
+@pytest.mark.parametrize("lookahead", [0, 1])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lookahead_hash_covers_prompt_embeds(lookahead, hash_fn):
+    request = make_request(
+        request_id="embeds",
+        prompt_token_ids=None,
+        prompt_embeds=torch.arange(32, dtype=torch.float32).reshape(16, 2),
+    )
+    request.block_hashes.clear()
+    hasher = get_request_block_hasher(4, hash_fn, lookahead)
+    original = hasher(request)
+    # Token IDs stay unchanged, but the first lookahead embedding changes.
+    request.prompt_embeds[4, 0] += 1
+    request._prompt_embeds_per_block_hashes.clear()
+    changed = hasher(request)
+    assert (original[0] != changed[0]) == bool(lookahead)
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
