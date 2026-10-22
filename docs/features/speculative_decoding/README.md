@@ -87,6 +87,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
+| `disable_lookahead_block_hashes` | `boolean` | `false` | Use legacy prefix-cache hashes and trailing-block dropping for EAGLE-like methods. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
@@ -106,6 +107,28 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
     Gemma 4 MTP support for that path. Upgrade to a version that includes
     Gemma 4 MTP support instead of forcing the assistant checkpoint through
     generic draft-model speculative decoding.
+
+### Prefix caching
+
+With prefix caching enabled, EAGLE-like methods use hashes that also cover the
+prefill lookahead tokens after each block. This lets matching requests reuse the
+trailing block without the legacy EAGLE block drop. A block becomes hashable only
+after its lookahead tokens are available.
+
+Lookahead hashing supports OffloadingConnector, MooncakeStoreConnector, NIXL,
+and Mooncake P/D.
+MultiConnector enables it only when every child supports it.
+Other connectors, KV cache events, and HiSparse keep legacy hashes. Engines sharing
+a content-addressed store must use the same hash mode and prefill lookahead length;
+otherwise their cache entries will not match. Set `"disable_lookahead_block_hashes": true` in
+`--speculative-config` to select the legacy behavior explicitly. Synchronous
+scheduling can still miss caching a final block whose hash becomes available only
+with the last output; output-time cache registration is unchanged.
+
+With lookahead hashing, P/D keeps the full prompt available to the drafter while
+the prefiller stops before the known lookahead suffix. The decoder computes that
+suffix locally. Prompts no longer than the lookahead are recomputed on the decoder.
+Both P/D engines must use the same lookahead hash mode and length.
 
 ### Method-specific keys
 

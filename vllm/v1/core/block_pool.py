@@ -487,10 +487,13 @@ class BlockPool:
 
         Returns:
             The hash key with group ID if a partial entry can be registered;
-            otherwise ``None`` for null blocks.
+            otherwise ``None`` for null blocks and lookahead hashes not yet
+            computed.
 
         """
-        if block.is_null:
+        if block.is_null or num_tokens // self.hash_block_size > len(
+            request.block_hashes
+        ):
             return None
 
         assert block_size % self.hash_block_size == 0

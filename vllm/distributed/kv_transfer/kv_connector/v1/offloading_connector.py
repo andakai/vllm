@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -51,6 +52,12 @@ from vllm.v1.request import Request
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
+
     @cached_property
     def _bounding_group_ids(self) -> tuple[int, ...]:
         """Prefix-cacheable groups this connector does not offload.
@@ -69,6 +76,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def scheduler(self) -> OffloadingConnectorScheduler:
         assert self.connector_scheduler is not None
         return self.connector_scheduler
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.use_lookahead_block_hashes = enabled
 
     @property
     def requires_kv_delivery(self) -> bool:

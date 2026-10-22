@@ -83,6 +83,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # The tokens will be loaded if not already present
             # in the prefill node local cache
             remote_num_tokens = params.get("remote_num_tokens") or 0
+            if (
+                request.prefill_stop_tokens is not None
+                and remote_num_tokens >= request.prefill_stop_tokens
+            ):
+                # A remote recurrent state cannot be rewound to our stop.
+                return 0, False
             count = (
                 min(remote_num_tokens, request.num_prompt_tokens) - num_computed_tokens
             )

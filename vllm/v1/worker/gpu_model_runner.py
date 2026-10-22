@@ -4895,6 +4895,7 @@ class GPUModelRunner(
                         self.requests,
                         self.input_batch,
                         self.discard_request_mask.gpu,
+                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     )
                 )
                 self._copy_valid_sampled_token_count(

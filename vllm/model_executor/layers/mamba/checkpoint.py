@@ -122,7 +122,9 @@ class MambaPrefillCheckpointBuilder:
         block_size = self.kv_cache_spec.block_size
         speculative_config = self.vllm_config.speculative_config
         drop_eagle_block = (
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
+            speculative_config is not None
+            and speculative_config.use_eagle_block_drop()
+            and not self.vllm_config.use_lookahead_block_hashes
         )
         checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
             [seq_lens[row] for row in request_rows],

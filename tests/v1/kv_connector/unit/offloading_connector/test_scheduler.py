@@ -17,7 +17,8 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.config import KVEventsConfig
+from vllm import SamplingParams
+from vllm.config import KVEventsConfig, SpeculativeConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -80,7 +81,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 
 def _as_mock(value: object) -> MagicMock:
@@ -137,6 +138,8 @@ def test_swa_offload_window_covers_unaligned_hit(
         get_manager=lambda: manager,
     )
     config = SimpleNamespace(
+        use_lookahead_block_hashes=False,
+        num_prefill_lookahead_tokens=0,
         speculative_config=None,
         cache_config=SimpleNamespace(
             enable_prefix_caching=True, prefix_cache_retention_interval=None
@@ -5120,3 +5123,95 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_lookahead_offload_waits_for_hash_then_stores_final_block(
+    request_runner, async_scheduling
+):
+    spec = SpeculativeConfig(method="ngram", num_speculative_tokens=1)
+    spec.method = "eagle3"
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=100,
+        blocks_per_chunk=2,
+        async_scheduling=async_scheduling,
+        speculative_config=spec,
+        enable_kv_cache_events=False,
+    )
+    request = runner.new_request(token_ids=list(range(16)))
+    assert len(request.block_hashes) == 3
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=((0, 0), (0, 1), (0, 2), (0, 3)),
+    )
+    assert len(request.block_hashes) == 4
+
+
+@pytest.mark.parametrize("lookahead", [1, 5])
+def test_lookahead_offload_lookup_uses_available_hashes(request_runner, lookahead):
+    spec = SpeculativeConfig(method="ngram", num_speculative_tokens=lookahead)
+    spec.method = "eagle3"
+    groups = [
+        KVCacheGroupSpec(
+            ["layer0"],
+            FullAttentionSpec(
+                block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+            is_eagle_group=True,
+        )
+    ]
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        kv_cache_groups=groups,
+        speculative_config=spec,
+        enable_kv_cache_events=False,
+    )
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher
+
+    request = Request(
+        request_id="lookahead",
+        prompt_token_ids=list(range(13)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256, lookahead),
+    )
+    sched = runner.connector_scheduler
+    sched.on_new_request(request)
+    state = sched._req_status[request.request_id]
+    state.update_offload_keys()
+    runner.manager.lookup.return_value = LookupResult.HIT
+    assert sched._lookup(state) == (13 - lookahead) // 4 * 4
+
+
+@pytest.mark.parametrize("lookahead, expected", [(1, 8), (2, 4)])
+def test_lookahead_partial_lookup_stays_within_hashes(lookahead, expected):
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+
+    config = create_vllm_config(kv_connector="OffloadingConnector", kv_role="kv_both")
+    config.cache_config.prefix_match_unit = 4
+    cache = _make_mamba_hybrid_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(config, cache))
+    scheduler = OffloadingConnectorScheduler(spec, config, cache)
+    assert scheduler.config.supports_partial_tail
+    init_none_hash(sha256)
+    request = Request(
+        request_id="partial",
+        prompt_token_ids=list(range(9)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256, lookahead),
+    )
+    scheduler.on_new_request(request)
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(state) == expected

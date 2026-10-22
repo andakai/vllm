@@ -63,6 +63,8 @@ def _partial_tail_non_mamba_puts(
     coord: MooncakeStoreCoordinator,
     req_meta: ReqMeta,
     block_sizes: Sequence[int],
+    *,
+    apply_eagle: bool = True,
 ) -> list[BoundaryPut]:
     """Locate the non-Mamba blocks a partial-tail save publishes.
 
@@ -83,7 +85,8 @@ def _partial_tail_non_mamba_puts(
     junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
 
     ``block_sizes`` are the per-group block sizes, indexed like
-    ``req_meta.block_ids``.
+    ``req_meta.block_ids``. ``apply_eagle`` is False under lookahead block
+    hashes, where the core neither backs off the checkpoint nor needs a proof.
     """
     mamba_tails = [
         put.num_tokens
@@ -101,8 +104,9 @@ def _partial_tail_non_mamba_puts(
     hash_block_size = coord.hash_block_size
     # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
     # groups carry the eagle flag.
+    drop_eagle_block = apply_eagle and coord.use_eagle
     boundary = get_mamba_prefill_checkpoint_position(
-        prompt_tokens, hash_block_size, coord.use_eagle
+        prompt_tokens, hash_block_size, drop_eagle_block
     )
     # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
     # attention KV, EAGLE proof included, ends on an attention block end no later
@@ -117,7 +121,9 @@ def _partial_tail_non_mamba_puts(
     for group_id, block_size in enumerate(block_sizes):
         if group_id in coord.mamba_group_ids:
             continue
-        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+        proof_end = boundary
+        if drop_eagle_block:
+            proof_end += coord.eagle_proof_margin_by_group.get(group_id, 0)
         if proof_end > completed or proof_end // hash_block_size > num_hashes:
             continue
         group_blocks = req_meta.block_ids[group_id]
@@ -153,6 +159,10 @@ class MooncakeStoreScheduler:
             kv_event_config and kv_event_config.enable_kv_cache_events
         )
         self.client = LookupKeyClient(vllm_config)
+        self.use_lookahead_block_hashes = vllm_config.use_lookahead_block_hashes
+        self._num_reprefillable_tokens = max(
+            0, vllm_config.num_prefill_lookahead_tokens - 1
+        )
         self.kv_cache_config = kv_cache_config
         self._store_group_ids = kv_cache_config.prefix_cacheable_group_ids
         # Map scheduler group IDs to store group indices. Groups outside the
@@ -203,9 +213,22 @@ class MooncakeStoreScheduler:
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
+        # The final lookahead hash exists only after the request's last sampled
+        # token, so its save is pinned at finish and emitted in the next step.
+        self._finished_lookahead_save_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
+
+    def _max_save_tokens(
+        self, request: Request, num_computed_tokens: int
+    ) -> int | None:
+        if not self.use_lookahead_block_hashes:
+            return None
+        return min(
+            len(request.block_hashes) * self._hash_block_size,
+            max(0, num_computed_tokens - self._num_reprefillable_tokens),
+        )
 
     def get_num_new_matched_tokens(
         self,
@@ -230,7 +253,7 @@ class MooncakeStoreScheduler:
 
         lookup_result = self.client.lookup(
             request.request_id,
-            request.num_tokens,
+            request.prefill_stop_tokens or request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )
@@ -365,6 +388,9 @@ class MooncakeStoreScheduler:
                 # producer. Loads are still carried by the same metadata.
                 skip_save=is_consumer,
                 block_hashes=request_real.block_hashes,
+                max_save_tokens=self._max_save_tokens(
+                    request_real, request_tracker.token_len
+                ),
                 num_prompt_tokens=request_real.num_prompt_tokens,
                 save_partial_tail=self.enable_partial_hash_hits,
             )
@@ -417,6 +443,9 @@ class MooncakeStoreScheduler:
                         load_spec=load_spec,
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
+                        max_save_tokens=self._max_save_tokens(
+                            request_real, request_tracker.token_len
+                        ),
                         num_prompt_tokens=request_real.num_prompt_tokens,
                         save_partial_tail=self.enable_partial_hash_hits,
                     )
@@ -460,6 +489,9 @@ class MooncakeStoreScheduler:
                         load_spec=None,
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
+                        max_save_tokens=self._max_save_tokens(
+                            unfinished_req, request_tracker.token_len
+                        ),
                         num_prompt_tokens=unfinished_req.num_prompt_tokens,
                         save_partial_tail=self.enable_partial_hash_hits,
                     )
@@ -519,6 +551,9 @@ class MooncakeStoreScheduler:
         for req_meta in self._finished_partial_tail_metas.values():
             meta.add_request(req_meta)
         self._finished_partial_tail_metas.clear()
+        for req_meta in self._finished_lookahead_save_metas.values():
+            meta.add_request(req_meta)
+        self._finished_lookahead_save_metas.clear()
 
         if not self._capacity_only:
             self._reference_save_blocks(meta)
@@ -567,7 +602,12 @@ class MooncakeStoreScheduler:
             if req_meta.store_job_id is not None:
                 assert req_meta.store_job_id in self._pinned_saves
                 continue
-            if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
+            if tail := _partial_tail_non_mamba_puts(
+                coord,
+                req_meta,
+                block_sizes,
+                apply_eagle=not self.use_lookahead_block_hashes,
+            ):
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
@@ -596,6 +636,46 @@ class MooncakeStoreScheduler:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
             pool.touch([pool.blocks[block_id] for block_id in block_ids])
+
+    def register_finished_lookahead_save(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> None:
+        """Pin and queue the save of lookahead hashes published at finish."""
+        if not self.use_lookahead_block_hashes:
+            return
+        if self.kv_role == "kv_consumer" and not self.save_decode_cache:
+            return
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return
+        # Decode KV is saved only with save_decode_cache, as in running steps.
+        tracker.token_len = min(
+            request.num_computed_tokens - request.num_in_flight_tokens,
+            request.num_tokens - 1
+            if self.save_decode_cache
+            else tracker.prefill_end_tokens,
+        )
+        if tracker.token_ids is not None:
+            tracker.token_ids = list(request.all_token_ids[: tracker.token_len])
+        tracker.allocated_block_ids = tuple(
+            block_ids[group_id].copy() for group_id in self._store_group_ids
+        )
+        req_meta = ReqMeta.from_request_tracker(
+            tracker,
+            self._block_size,
+            block_hashes=request.block_hashes,
+            max_save_tokens=self._max_save_tokens(request, tracker.token_len),
+            num_prompt_tokens=request.num_prompt_tokens,
+        )
+        if req_meta is None:
+            return
+        meta = MooncakeStoreConnectorMetadata(set(), set())
+        meta.add_request(req_meta)
+        self._reference_save_blocks(meta)
+        if req_meta.store_job_id in self._pinned_saves:
+            self._finished_lookahead_save_metas[request.request_id] = req_meta
 
     def register_finished_partial_tail(
         self,
@@ -646,6 +726,7 @@ class MooncakeStoreScheduler:
                 coord,
                 req_meta,
                 [g.kv_cache_spec.block_size for g in coord.kv_cache_groups],
+                apply_eagle=not self.use_lookahead_block_hashes,
             ),
             *mamba_puts,
         ]

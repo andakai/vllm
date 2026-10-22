@@ -15,6 +15,7 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     try_get_attention_backend,
 )
+from vllm import SamplingParams
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -1241,3 +1242,37 @@ def test_set_inputs_first_pass_dflash():
 
     # Verify hidden states (stored by reference, not copied)
     assert proposer._dflash_hidden_states is target_hidden_states
+
+
+def test_padded_draft_reads_next_chunk_token():
+    device = torch.device(DEVICE_TYPE)
+    request = CachedRequestState(
+        req_id="chunk",
+        prompt_token_ids=list(range(16)),
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=1),
+        generator=None,
+        block_ids=([0],),
+        num_computed_tokens=4,
+        output_token_ids=[],
+    )
+    batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=32,
+        max_num_batched_tokens=16,
+        device=device,
+        vocab_size=100,
+        block_sizes=[16],
+        max_num_blocks_per_req=[2],
+    )
+    batch.add_request(request)
+    proposer = _create_proposer("eagle", 1)
+    next_tokens, counts = proposer.prepare_next_token_ids_padded(
+        torch.tensor([[99]], dtype=torch.int32, device=device),
+        {request.req_id: request},
+        batch,
+        torch.tensor([True], dtype=torch.bool, device=device),
+        num_scheduled_tokens={request.req_id: 4},
+    )
+    assert next_tokens.tolist() == [8]
+    assert counts.tolist() == [0]

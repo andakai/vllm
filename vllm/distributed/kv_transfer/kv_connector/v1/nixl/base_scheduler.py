@@ -64,6 +64,7 @@ class NixlBaseConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
+        self.use_lookahead_block_hashes = vllm_config.use_lookahead_block_hashes
         parallel_config = vllm_config.parallel_config
         # TP1 PCP+DCP exposes its DCP shards as transfer ranks.
         self.transfer_tp_size = max(
@@ -394,6 +395,8 @@ class NixlBaseConnectorScheduler:
         decoder would never rebuild them, because the update is sized by the rejection
         count, which is zero for the first decode.
         """
+        if self.use_lookahead_block_hashes:
+            return self.vllm_config.num_prefill_lookahead_tokens
         return max(
             1 if self._has_mamba or self._bounded_replay else 0,
             self.vllm_config.num_prefill_lookahead_tokens - 1,
@@ -404,6 +407,8 @@ class NixlBaseConnectorScheduler:
         Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
         will recompute locally."""
         backoff = self._prefill_backoff()
+        if self.use_lookahead_block_hashes:
+            return max(0, num_prompt_tokens - backoff)
         if backoff and num_prompt_tokens > backoff:
             return num_prompt_tokens - backoff
         return num_prompt_tokens
@@ -428,6 +433,9 @@ class NixlBaseConnectorScheduler:
             # loads nothing on the decoder, which recomputes its whole prompt.
             and not request.get_skip_reading_prefix_cache()
         ):
+            if self.use_lookahead_block_hashes:
+                request.prefill_stop_tokens = request.num_prompt_tokens - backoff
+                return
             if request.prompt_token_ids is not None:
                 del request.prompt_token_ids[-backoff:]
             elif request.prompt_embeds is not None:
@@ -451,9 +459,24 @@ class NixlBaseConnectorScheduler:
         # request is a chunked prefill, so we need to check if new blocks are added
         for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
             req_to_save = self._reqs_need_save.get(req_id)
-            if req_to_save is None or new_block_id_groups is None:
+            if req_to_save is None:
                 continue
             req = req_to_save
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            is_partial = (req.num_computed_tokens + num_scheduled_tokens) < (
+                req.prefill_stop_tokens or req.num_prompt_tokens
+            )
+            if not is_partial:
+                # The final step can update previously allocated tail blocks.
+                block_state = scheduler_output.kv_connector_block_state
+                assert block_state is not None
+                resolve = block_state.resolve_computed_block_ids
+                assert resolve is not None
+                new_block_id_groups = resolve(
+                    req_id, req.num_computed_tokens + num_scheduled_tokens
+                )
+            if new_block_id_groups is None:
+                continue
 
             assert req.kv_transfer_params is not None
             clipped_block_id_groups = self.get_exchange_clipped_blocks(
@@ -464,11 +487,6 @@ class NixlBaseConnectorScheduler:
                 local_block_ids=clipped_block_id_groups,
                 kv_transfer_params=req.kv_transfer_params,
             )
-            assert scheduler_output.num_scheduled_tokens is not None
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            is_partial = (
-                req.num_computed_tokens + num_scheduled_tokens
-            ) < req.num_prompt_tokens
             if not is_partial:
                 # For non-partial prefills, once new req_meta is scheduled, it
                 # can be removed from _reqs_need_save.

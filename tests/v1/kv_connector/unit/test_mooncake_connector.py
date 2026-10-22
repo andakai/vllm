@@ -323,6 +323,7 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
 async def test_build_transfer_params_separates_prefill_pp_layers():
     """Each producer PP stage should send only its registered layer shard."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.use_lookahead_block_hashes = False
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
@@ -1310,6 +1311,7 @@ async def test_receive_kv_selects_remote_pp_workers(
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
     """Producer-side completion waits for every paired consumer TP pull."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.use_lookahead_block_hashes = False
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
@@ -1574,6 +1576,7 @@ def test_pull_completion_requires_local_blocks(
     expected_finished: set[str],
 ):
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.use_lookahead_block_hashes = False
     worker.shutdown = MagicMock()
     worker.finished_recving_reqs = set()
     pull_meta = PullReqMeta(
@@ -2096,6 +2099,7 @@ async def test_build_transfer_params_sends_packed_region_once(
 ):
     """Packed region coalesces contiguous blocks, including shared-group flatten."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.use_lookahead_block_hashes = False
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
@@ -2959,3 +2963,31 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_lookahead", [0, 3])
+async def test_lookahead_protocol_is_checked_before_layout(remote_lookahead):
+    worker, _, _, _ = _register_sliced_packed_mla([0])
+    config = create_vllm_config(
+        kv_connector="MooncakeConnector", num_speculative_tokens=3
+    )
+    config.speculative_config.method = "mtp"
+    config.speculative_config.draft_model_config = config.model_config
+    config.model_config.hf_config.num_nextn_predict_layers = 3
+    worker.vllm_config = config
+    worker.use_lookahead_block_hashes = config.use_lookahead_block_hashes
+    meta = _short_xfer_meta(worker, 99, {"d": ("xfer", [[1]])})
+    meta.lookahead_prefill_tokens = remote_lookahead
+    sock = MagicMock()
+    sock.send_multipart = AsyncMock()
+    if remote_lookahead != 3:
+        with pytest.raises(ValueError, match="protocols differ"):
+            await worker.send_kv_to_decode(b"d", sock, meta)
+        sock.send_multipart.assert_not_called()
+        return
+    await worker.send_kv_to_decode(b"d", sock, meta)
+    _, payload = sock.send_multipart.call_args[0][0]
+    response = worker._xfer_resp_decoder.decode(payload)
+    assert response.status == MooncakeXferResponseStatus.LAYOUT_MISS
+    assert response.lookahead_prefill_tokens == 3

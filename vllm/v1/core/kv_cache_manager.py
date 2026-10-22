@@ -292,7 +292,7 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.num_tokens - 1
+        max_cache_hit_length = (request.prefill_stop_tokens or request.num_tokens) - 1
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
@@ -355,7 +355,8 @@ class KVCacheManager:
 
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes,
+            (request.prefill_stop_tokens or request.num_tokens) - 1,
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
@@ -517,7 +518,9 @@ class KVCacheManager:
 
         # Matches the scheduler's own prefill boundary: `num_tokens - 1`
         # extends it to resumed requests replaying their output tokens.
-        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        prefill_end = request.prefill_stop_tokens or max(
+            request.num_prompt_tokens, request.num_tokens - 1
+        )
 
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.

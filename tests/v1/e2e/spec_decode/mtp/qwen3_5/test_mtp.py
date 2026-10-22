@@ -147,3 +147,57 @@ def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
             context="after weight reload",
         )
         assert al == pytest.approx(ref_al, rel=0.03)
+
+
+@single_gpu_only
+def test_mtp_offloading_lookahead_prefix(vllm_runner):
+    import time
+
+    from tests.models.utils import check_logprobs_close
+    from vllm import TokensPrompt
+
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B-Base",
+        enable_prefix_caching=True,
+        max_model_len=2048,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+        kv_transfer_config={
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"cpu_bytes_to_use": 512 << 20},
+        },
+        limit_mm_per_prompt={"image": 0, "video": 0},
+    ) as model:
+        tokens = model.llm.get_tokenizer().encode("Prefix cache context. " * 400)[
+            -1089:
+        ]
+        prompt = TokensPrompt(prompt_token_ids=tokens)
+        params = SamplingParams(temperature=0, max_tokens=32, logprobs=5)
+        cold = model.llm.generate([prompt], params)[0]
+        # Successful reset also proves outstanding saves released their GPU blocks.
+        deadline = time.monotonic() + 30
+        while not model.llm.reset_prefix_cache(reset_connector=False):
+            assert time.monotonic() < deadline, "Offloading saves did not drain"
+            time.sleep(0.01)
+        warm = model.llm.generate([prompt], params)[0]
+        assert cold.num_cached_tokens == 0
+        assert warm.num_cached_tokens == 1088
+        check_logprobs_close(
+            outputs_0_lst=[
+                (
+                    list(cold.outputs[0].token_ids),
+                    cold.outputs[0].text,
+                    cold.outputs[0].logprobs,
+                )
+            ],
+            outputs_1_lst=[
+                (
+                    list(warm.outputs[0].token_ids),
+                    warm.outputs[0].text,
+                    warm.outputs[0].logprobs,
+                )
+            ],
+            name_0="cold",
+            name_1="warm",
+            always_check_logprobs=True,
+        )

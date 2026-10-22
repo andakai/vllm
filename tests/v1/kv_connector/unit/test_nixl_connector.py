@@ -5132,3 +5132,114 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+def test_lookahead_prefill_protocol_changes_compatibility_hash():
+    config = create_vllm_config()
+    hashes = [
+        compute_nixl_compatibility_hash(
+            config, "FLASH_ATTN", lookahead_prefill_tokens=n
+        )
+        for n in (0, 1, 3)
+    ]
+    assert len(set(hashes)) == 3
+    assert hashes[0] == compute_nixl_compatibility_hash(config, "FLASH_ATTN")
+
+
+@pytest.mark.parametrize("connector_name", ["NixlConnector", "NixlPushConnector"])
+@pytest.mark.parametrize("sliding_window", [None, 16])
+def test_host_save_refreshes_final_chunk_without_new_blocks(
+    connector_name, sliding_window
+):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_scheduler
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.sched.output import (
+        CachedRequestData,
+        KVConnectorBlockState,
+        SchedulerOutput,
+    )
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    config = create_vllm_config(kv_connector=connector_name, kv_role="kv_producer")
+    config.kv_transfer_config.kv_buffer_device = "cpu"
+    cache_config = make_kv_cache_config(block_size=16)
+    if sliding_window is not None:
+        cache_config.kv_cache_groups[0].kv_cache_spec = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float16,
+            sliding_window=sliding_window,
+        )
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    with patch.object(base_scheduler.current_platform, "device_type", "cuda"):
+        connector = KVConnectorFactory.create_connector(
+            config, KVConnectorRole.SCHEDULER, cache_config
+        )
+    manager = KVCacheManager(
+        cache_config, max_model_len=128, scheduler_block_size=16, hash_block_size=16
+    )
+    request = create_request(num_tokens=25, do_remote_decode=True)
+    request.prefill_stop_tokens = 24
+    blocks = manager.allocate_slots(request, 24, num_lookahead_tokens=32)
+    assert blocks is not None
+    request.num_computed_tokens = 16
+    connector.update_state_after_alloc(request, blocks, 0)
+    cached = CachedRequestData(
+        req_ids=[request.request_id],
+        resumed_req_ids=set(),
+        new_token_ids=[[]],
+        all_token_ids={},
+        new_block_ids=[None],
+        num_computed_tokens=[16],
+        num_output_tokens=[0],
+    )
+    output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=cached,
+        num_scheduled_tokens={request.request_id: 8},
+        total_num_scheduled_tokens=8,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids={request.request_id},
+            resolve_block_ids=manager.get_block_ids,
+            boundary_state_offloads={},
+            resolve_computed_block_ids=manager.get_block_ids_for_computed_tokens,
+        ),
+    )
+    meta = connector.build_connector_meta(output)
+    assert meta.reqs_to_save[request.request_id].local_block_ids == tuple(
+        ids[:2] for ids in blocks.get_block_ids()
+    )
+    assert not connector.connector_scheduler._reqs_need_save
+
+
+@pytest.mark.parametrize(
+    "remote_tokens,expected", [(16, (16, True)), (24, (0, False)), (25, (0, False))]
+)
+def test_bidirectional_prefill_does_not_load_past_stop(remote_tokens, expected):
+    config = create_vllm_config(
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "bidirectional_kv_xfer": True,
+            "kv_recompute_threshold": 0,
+        },
+    )
+    connector = NixlConnector(
+        config, KVConnectorRole.SCHEDULER, make_kv_cache_config(block_size=16)
+    )
+    request = create_request(num_tokens=25, do_remote_decode=True)
+    request.prefill_stop_tokens = 24
+    request.kv_transfer_params.update(
+        remote_num_tokens=remote_tokens,
+        remote_block_ids=[[1, 2]],
+        remote_engine_id="decode",
+        remote_request_id="cached",
+        remote_host="localhost",
+        remote_port=1234,
+    )
+    assert connector.get_num_new_matched_tokens(request, 0) == expected

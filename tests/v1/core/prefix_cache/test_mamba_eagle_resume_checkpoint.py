@@ -36,9 +36,12 @@ def _manager(
     num_blocks=8192,
     eagle_group=None,
     num_prefill_lookahead=0,
+    lookahead=False,
 ):
     init_none_hash(sha256)
     config = _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba"])
+    if lookahead and eagle_group is None:
+        eagle_group = 1
     if eagle_group is not None:
         groups = list(config.kv_cache_groups)
         groups[eagle_group] = replace(groups[eagle_group], is_eagle_group=True)
@@ -48,7 +51,7 @@ def _manager(
         max_model_len=1 << 20,
         enable_caching=True,
         hash_block_size=hash_block_size,
-        use_eagle=True,
+        use_eagle=not lookahead,
         num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,
     )
@@ -121,7 +124,7 @@ def _prefill(manager, stub, request, *, external=0) -> list[int]:
     return ends
 
 
-def _orphaned_full_attention_tail(manager, stub, prompt_len):
+def _orphaned_full_attention_tail(manager, stub, prompt_len, *, lookahead=False):
     """Produce the state a KV connector leaves behind, which creates a junction.
 
     NIXL reports ``num_prompt_tokens - 1`` external computed tokens for Mamba
@@ -130,13 +133,23 @@ def _orphaned_full_attention_tail(manager, stub, prompt_len):
     partial tail the Mamba group has no state for.
     """
     producer = make_request(
-        "producer", PREFIX[:prompt_len], stub.hash_block_size, sha256
+        "producer",
+        PREFIX[:prompt_len],
+        stub.hash_block_size,
+        sha256,
+        use_lookahead_hashes=lookahead,
     )
     _prefill(manager, stub, producer, external=prompt_len - 1)
 
 
-def _sibling_hit(manager, shared, suffix, hash_block_size):
-    request = make_request("sibling", PREFIX[:shared] + suffix, hash_block_size, sha256)
+def _sibling_hit(manager, shared, suffix, hash_block_size, *, lookahead=False):
+    request = make_request(
+        "sibling",
+        PREFIX[:shared] + suffix,
+        hash_block_size,
+        sha256,
+        use_lookahead_hashes=lookahead,
+    )
     return manager.get_computed_blocks(request)[1]
 
 
@@ -144,22 +157,27 @@ def _sibling_hit(manager, shared, suffix, hash_block_size):
 # The two positions a sibling resumes at
 
 
-def test_sibling_resumes_from_the_observed_junction():
+@pytest.mark.parametrize("lookahead", [False, True])
+def test_sibling_resumes_from_the_observed_junction(lookahead):
     """The scheduler splits at the junction; the manager must cache there."""
     block_size, hash_block_size = 512, 32
-    manager = _manager(block_size, hash_block_size)
-    stub = _stub(manager, block_size, hash_block_size)
+    manager = _manager(block_size, hash_block_size, lookahead=lookahead)
+    stub = _stub(manager, block_size, hash_block_size, block_drop=not lookahead)
     assert stub.mamba_shared_prefix_checkpoint, "the feature must be armed"
-    _orphaned_full_attention_tail(manager, stub, 2020)
+    _orphaned_full_attention_tail(manager, stub, 2020, lookahead=lookahead)
 
     consumer = make_request(
-        "consumer", PREFIX[:2016] + [-1] * 584, hash_block_size, sha256
+        "consumer",
+        PREFIX[:2016] + [-1] * 584,
+        hash_block_size,
+        sha256,
+        use_lookahead_hashes=lookahead,
     )
     junction = manager.get_computed_blocks(consumer)[2]
     assert junction, "expected a junction against the orphaned full-attention tail"
     _prefill(manager, stub, consumer)
 
-    hit = _sibling_hit(manager, 2016, [-2] * 584, hash_block_size)
+    hit = _sibling_hit(manager, 2016, [-2] * 584, hash_block_size, lookahead=lookahead)
     assert hit == junction, (
         f"the chunk stopped at {junction} but nothing was cached there: "
         f"sibling resumes at {hit}"
@@ -384,3 +402,43 @@ def test_disabled_by_default():
     request = make_request("r", PREFIX[:10000], hash_block_size, sha256)
     request.shared_prefix_boundary = 2000
     assert Scheduler._mamba_block_aligned_split(stub, request, 8192) == 1536
+
+
+@pytest.mark.parametrize("lookahead", [False, True])
+def test_async_prompt_tail_state_is_copied_before_the_next_chunk(lookahead):
+    """Async scheduling allocates the next chunk before the previous chunk's
+    output arrives. The next chunk's forward overwrites the partial prompt-tail
+    Mamba state in place, so its copy must be queued by that allocation."""
+    block_size, hash_block_size = 16, 4
+    manager = _manager(block_size, hash_block_size, lookahead=lookahead)
+    stub = _stub(manager, block_size, hash_block_size, block_drop=not lookahead)
+    mamba = manager.coordinator.single_type_managers[1]
+    request = make_request(
+        "r", PREFIX[:30], hash_block_size, sha256, use_lookahead_hashes=lookahead
+    )
+    manager.get_computed_blocks(request)
+
+    ends: list[int] = []
+    copied_sources: list[set[int]] = []
+    while request.num_computed_tokens < request.num_tokens:
+        start = request.num_computed_tokens
+        num_new = Scheduler._mamba_block_aligned_split(
+            stub, request, request.num_tokens - start, 0, 0
+        )
+        assert manager.allocate_slots(request, num_new, has_scheduled_reqs=False)
+        request.num_computed_tokens = start + num_new
+        ends.append(request.num_computed_tokens)
+        copies, retained = manager.take_kv_cache_block_copies()
+        copied_sources.append({copy.src_block_id for copy in copies})
+        if retained:
+            manager.block_pool.free_blocks(retained)
+        manager.new_step_starts()
+
+    tail = next(e for e in ends if e % block_size and e < request.num_prompt_tokens)
+    step = ends.index(tail)
+    assert step + 1 < len(ends), f"no chunk follows the tail: {ends}"
+    tail_block = mamba.req_to_blocks["r"][tail // block_size]
+    assert tail_block.block_id in copied_sources[step + 1], (
+        f"chunks {ends}: the state at {tail} lives in block {tail_block.block_id} "
+        f"but the next chunk's copies were {copied_sources[step + 1]}"
+    )
