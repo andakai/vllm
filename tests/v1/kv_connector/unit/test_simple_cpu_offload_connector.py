@@ -85,9 +85,9 @@ def _make_connector(
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("num_lookahead", [1, 5])
 @pytest.mark.parametrize("nested", [False, True])
-@pytest.mark.parametrize("supported", [False, True])
+@pytest.mark.parametrize("cpu_only", [False, True])
 def test_multi_cpu_coordinator_uses_parent_hash_protocol(
-    num_lookahead, nested, supported
+    num_lookahead, nested, cpu_only
 ):
     config = _make_lookahead_config(num_lookahead)
     children = [
@@ -98,7 +98,7 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(
         },
         {
             "kv_connector": "SimpleCPUOffloadConnector"
-            if supported
+            if cpu_only
             else "ExampleConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"num_cpu_blocks": 8},
@@ -122,12 +122,12 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(
     child = connector.sub_connectors[0]
     if nested:
         child = child.sub_connectors[0]
-    expected = num_lookahead if supported else 0
+    expected = num_lookahead
     assert config.num_hash_lookahead_tokens == expected
     assert not config.speculative_config.disable_lookahead_block_hashes
     coord = child.scheduler_manager.cpu_coordinator
     assert coord.block_pool.num_hash_lookahead_tokens == expected
-    assert coord.drop_eagle_group_ids == (set() if supported else {0})
+    assert coord.drop_eagle_group_ids == set()
 
 
 def test_disk_mode_rejects_non_positive_capacity() -> None:

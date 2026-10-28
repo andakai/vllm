@@ -216,24 +216,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
 
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
-            "connectors", []
-        )
-        if not connectors_config:
-            return False
-        for conn_config in connectors_config:
-            child_config = KVTransferConfig(
-                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
-            )
-            connector_cls = KVConnectorFactory.get_connector_class(child_config)
-            if not connector_cls.supports_lookahead_block_hashes(child_config):
-                return False
-        return True
-
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
@@ -259,14 +241,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
         assert ktcs is not None
         ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
-        num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
-            if not num_hash_lookahead_tokens and vllm_config.speculative_config:
-                temp_config.speculative_config = copy.copy(
-                    vllm_config.speculative_config
-                )
-                temp_config.speculative_config.disable_lookahead_block_hashes = True
             engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id

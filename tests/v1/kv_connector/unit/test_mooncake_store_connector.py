@@ -1405,8 +1405,8 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("all_supported", [False, True])
-def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
+@pytest.mark.parametrize("store_only", [False, True])
+def test_store_uses_multi_connectors_final_hash_protocol(store_only):
     num_lookahead = 2
     config = create_vllm_config(
         kv_connector="MultiConnector",
@@ -1418,7 +1418,7 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
                 {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"},
                 {
                     "kv_connector": "MooncakeStoreConnector"
-                    if all_supported
+                    if store_only
                     else "ExampleConnector",
                     "kv_role": "kv_both",
                 },
@@ -1438,12 +1438,12 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
         )
     store_connector = connector.sub_connectors[0]
     coord = store_connector.connector_scheduler._store_coord
-    assert coord.num_hash_lookahead_tokens == (num_lookahead if all_supported else 0)
+    assert coord.num_hash_lookahead_tokens == num_lookahead
     hashes = [bytes([i]) for i in range(4)]
     cached = ExternalCachedBlockPool(16, {(0, h) for h in hashes})
     _, hit = coord.find_longest_cache_hit(hashes, 64, cached)
-    assert hit == (64 if all_supported else 48)
-    # Even with the legacy protocol, applying the load mask must not drop again.
+    assert hit == 64
+    # Applying the load mask must not drop a lookahead-protected block.
     assert coord.load_mask(hashes, hit) == ([True] * (hit // 16),)
 
 

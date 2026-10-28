@@ -194,19 +194,6 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        """Whether the connector supports lookahead block hashes.
-
-        A capable connector transfers request-local KV or limits cache stores
-        and lookups to blocks covered by ``request.block_hashes``. These hashes
-        include the required lookahead tokens, so no extra EAGLE trailing-block
-        drop is needed. Defaults to False.
-        """
-        return False
-
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
