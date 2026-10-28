@@ -301,7 +301,7 @@ class KVCacheManager:
         # could slightly improve performance in the future.
         max_cache_hit_length = min(
             request.get_max_cache_hit_length(max_cache_hit_length),
-            self.block_pool.hash_policy.reusable_tokens(request.num_tokens),
+            len(request.block_hashes) * self.block_pool.hash_block_size,
         )
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
@@ -365,7 +365,7 @@ class KVCacheManager:
 
         max_cache_hit_length = min(
             request.get_max_cache_hit_length(max_cache_hit_length),
-            self.block_pool.hash_policy.reusable_tokens(request.num_tokens),
+            len(request.block_hashes) * self.block_pool.hash_block_size,
         )
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(

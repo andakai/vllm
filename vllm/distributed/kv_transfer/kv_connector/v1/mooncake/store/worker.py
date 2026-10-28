@@ -33,7 +33,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import BlockStored, get_block_stored_event_tokens
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -1004,8 +1004,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     if any(index in failed_indices for index in event_indices):
                         continue
                     db = self.token_databases[g_idx]
-                    token_ids, lookahead_token_ids = req_meta.hash_policy.event_tokens(
-                        event_token_ids, s, end, db.block_size, token_ids_start
+                    token_ids, lookahead_token_ids = get_block_stored_event_tokens(
+                        event_token_ids,
+                        s,
+                        end,
+                        db.block_size,
+                        self.coord.num_hash_lookahead_tokens,
+                        token_ids_start,
                     )
                     stored_events.append(
                         BlockStored(
@@ -2095,14 +2100,24 @@ class MooncakeStoreWorker:
     ) -> MooncakeLookupResult:
         """Check how many prefix tokens exist in the store.
 
-        Checks across all rank-specific key namespaces that may be loaded. A
-        hit covering all ``num_tokens`` is re-derived below the request end so
-        the last token is recomputed for sampling.
+        Checks across all rank-specific key namespaces that may be loaded.
+        Reserve the last token for sampling before lookup, except when legacy
+        drop needs a proof block; reconcile that result below the request end.
         """
         if self._capacity_only:
             return MooncakeLookupResult(0)
 
-        token_len = self.coord.align_lookup_length(num_tokens)
+        hash_coverage = len(block_hashes) * self.hash_block_size
+        usable_length = self.coord.align_lookup_length(
+            max(0, min(num_tokens - 1, hash_coverage))
+        )
+        # Legacy drop may probe an extra proof block. Otherwise establish the
+        # final bound before SWA/Mamba lookup chooses its required state.
+        token_len = (
+            self.coord.align_lookup_length(min(num_tokens, hash_coverage))
+            if self.coord.use_eagle
+            else usable_length
+        )
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
@@ -2187,9 +2202,6 @@ class MooncakeStoreWorker:
             block_hashes,
             token_len,
             cached_block_pool,
-        )
-        usable_length = self.coord.align_lookup_length(
-            self.coord.hash_policy.reusable_tokens(num_tokens)
         )
         if hit_length > usable_length:
             if usable_length <= 0:

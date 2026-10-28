@@ -15,6 +15,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    get_block_stored_event_tokens,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.logger import init_logger
@@ -27,6 +28,7 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     ExternalBlockHash,
+    generate_lookahead_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
@@ -404,9 +406,9 @@ class SimpleCPUOffloadScheduler:
             return 0, False
         # Must recompute at least the last token, matching the logic in
         # kv_cache_manager.get_computed_blocks().
-        max_hit_len = (
-            self.cpu_block_pool.hash_policy.reusable_tokens(request.num_tokens)
-            - num_computed_tokens
+        max_hit_len = min(
+            request.num_tokens - 1 - num_computed_tokens,
+            len(remaining_hashes) * self.hash_block_size,
         )
         if max_hit_len <= 0:
             return 0, False
@@ -896,8 +898,8 @@ class SimpleCPUOffloadScheduler:
             cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
                 confirmed_tokens, g
             )
-            cacheable_tokens = self.cpu_block_pool.hash_policy.cacheable_tokens(
-                request.block_hashes, cacheable_tokens
+            cacheable_tokens = min(
+                cacheable_tokens, len(request.block_hashes) * self.hash_block_size
             )
             ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
@@ -940,15 +942,20 @@ class SimpleCPUOffloadScheduler:
                         else maybe_convert_block_hash(resolved_hashes[i - 1])
                     )
                     lora_req = request.lora_request
-                    event_tokens, lookahead_token_ids = (
-                        self.cpu_block_pool.hash_policy.event_tokens(
-                            request.all_token_ids, token_start, token_end, group_size
-                        )
+                    lookahead = self.cpu_block_pool.num_hash_lookahead_tokens
+                    event_tokens, lookahead_token_ids = get_block_stored_event_tokens(
+                        request.all_token_ids,
+                        token_start,
+                        token_end,
+                        group_size,
+                        lookahead,
                     )
-                    extra_keys, curr_mm_idx = (
-                        self.cpu_block_pool.hash_policy.event_extra_keys(
-                            request, token_start, token_end, curr_mm_idx
-                        )
+                    extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
+                        request,
+                        token_start,
+                        token_end,
+                        token_end + lookahead,
+                        curr_mm_idx,
                     )
                     meta_by_hash = {
                         primary_block_hash: BlockStoreMeta(
@@ -973,18 +980,20 @@ class SimpleCPUOffloadScheduler:
                         hash_start = hash_idx * self.hash_block_size
                         hash_end = hash_start + self.hash_block_size
                         secondary_tokens, secondary_lookahead = (
-                            self.cpu_block_pool.hash_policy.event_tokens(
+                            get_block_stored_event_tokens(
                                 request.all_token_ids,
                                 hash_start,
                                 hash_end,
                                 self.hash_block_size,
+                                lookahead,
                             )
                         )
                         secondary_extra_keys, secondary_mm_idx = (
-                            self.cpu_block_pool.hash_policy.event_extra_keys(
+                            generate_lookahead_block_hash_extra_keys(
                                 request,
                                 hash_start,
                                 hash_end,
+                                hash_end + lookahead,
                                 secondary_mm_idx,
                             )
                         )
@@ -1344,12 +1353,15 @@ class SimpleCPUOffloadScheduler:
         token_limit = (
             request.num_prompt_tokens
             if manager.use_eagle
-            else self.cpu_block_pool.hash_policy.reusable_tokens(
+            else max(
+                0,
                 request.num_prompt_tokens
+                - max(1, self.cpu_block_pool.num_hash_lookahead_tokens),
             )
         )
-        boundary_tokens = self.cpu_block_pool.hash_policy.cacheable_tokens(
-            request.block_hashes, token_limit, self.hash_block_size
+        boundary_tokens = (
+            min(len(request.block_hashes), token_limit // self.hash_block_size)
+            * self.hash_block_size
         )
         if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
             return None

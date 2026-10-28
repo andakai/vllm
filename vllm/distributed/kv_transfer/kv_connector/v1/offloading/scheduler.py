@@ -33,7 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.v1.core.kv_cache_hash_policy import BlockHashPolicy
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import eagle_proof_margin
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -608,10 +607,6 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
-        self.hash_policy = BlockHashPolicy(
-            self.config.tokens_per_hash, vllm_config.num_hash_lookahead_tokens
-        )
-
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
         # payload is enough.
@@ -715,7 +710,7 @@ class OffloadingConnectorScheduler:
                 group.group_idx: group.kv_event_group_spec
                 for group in self.config.kv_group_configs
             },
-            hash_policy=self.hash_policy,
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
         )
 
     # Holds the manager lock for the current schedule(), or None between steps.
@@ -811,7 +806,7 @@ class OffloadingConnectorScheduler:
         self, req_status: RequestOffloadState, num_computed_tokens: int
     ) -> int:
         num = min(num_computed_tokens, req_status.req.num_tokens)
-        num = self.hash_policy.cacheable_tokens(req_status.req.block_hashes, num)
+        num = min(num, len(req_status.req.block_hashes) * self.config.tokens_per_hash)
         max_offload_tokens = req_status.max_offload_tokens
         if max_offload_tokens is not None:
             num = min(num, max_offload_tokens)

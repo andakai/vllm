@@ -283,12 +283,12 @@ class Request:
         self.update_block_hashes()
 
     def update_block_hashes(self) -> None:
-        """Compute block hashes for any new full blocks and append them."""
+        """Refresh the hash prefix after appending or truncating tokens."""
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
 
     def truncate_prompt_tokens(self, num_tokens: int) -> None:
-        """Shorten an uncomputed prompt and rebuild its derived hash state."""
+        """Shorten an uncomputed prompt, preserving its valid hash prefix."""
         assert 0 < num_tokens < self.num_prompt_tokens
         assert self.num_computed_tokens == 0 and not self._output_token_ids
         if self.prompt_token_ids is not None:
@@ -299,10 +299,10 @@ class Request:
             del self.prompt_is_token_ids[num_tokens:]
         del self._all_token_ids[num_tokens:]
         self.num_prompt_tokens = num_tokens
-        self.block_hashes.clear()
-        self._prompt_embeds_per_block_hashes.clear()
+        for block_range in list(self._prompt_embeds_per_block_hashes):
+            if block_range[1] > num_tokens:
+                del self._prompt_embeds_per_block_hashes[block_range]
         self.update_block_hashes()
-        self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
 
     @property
     def use_structured_output(self) -> bool:

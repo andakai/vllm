@@ -105,7 +105,7 @@ def _partial_tail_non_mamba_puts(
         prompt_tokens,
         hash_block_size,
         coord.use_eagle,
-        coord.hash_policy.num_lookahead_tokens,
+        coord.num_hash_lookahead_tokens,
     )
     # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
     # attention KV, EAGLE proof included, ends on an attention block end no later
@@ -365,7 +365,7 @@ class MooncakeStoreScheduler:
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
-                self._store_coord.hash_policy,
+                self._hash_block_size,
                 load_spec=load_spec,
                 # A consumer may write decode KV without becoming a prefill
                 # producer. Loads are still carried by the same metadata.
@@ -420,7 +420,7 @@ class MooncakeStoreScheduler:
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
-                        self._store_coord.hash_policy,
+                        self._hash_block_size,
                         load_spec=load_spec,
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
@@ -464,7 +464,7 @@ class MooncakeStoreScheduler:
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
-                        self._store_coord.hash_policy,
+                        self._hash_block_size,
                         load_spec=None,
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
@@ -501,7 +501,7 @@ class MooncakeStoreScheduler:
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
-                    self._store_coord.hash_policy,
+                    self._hash_block_size,
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=unfinished_req.block_hashes,
@@ -583,10 +583,10 @@ class MooncakeStoreScheduler:
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
             if self.enable_kv_events:
                 request, _ = self._unfinished_requests[req_meta.req_id]
-                req_meta.hash_policy = coord.hash_policy
-                req_meta.token_ids = coord.hash_policy.event_token_ids(
-                    request, req_meta.token_ids_start, req_meta.token_len_chunk
-                )
+                req_meta.token_ids = request.all_token_ids[
+                    req_meta.token_ids_start : req_meta.token_len_chunk
+                    + coord.num_hash_lookahead_tokens
+                ]
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids = [put.block_id for put in req_meta.boundary_puts or []]
@@ -641,7 +641,7 @@ class MooncakeStoreScheduler:
         req_meta = ReqMeta.from_request_tracker(
             tracker,
             self._block_size,
-            coord.hash_policy,
+            self._hash_block_size,
             block_hashes=request.block_hashes,
             num_prompt_tokens=request.num_prompt_tokens,
         )

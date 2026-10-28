@@ -6,7 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from itertools import count
 from queue import Queue
@@ -118,6 +118,30 @@ class BlockStored(KVCacheEvent):
                 else None,
             )
         )
+
+
+def get_block_stored_event_tokens(
+    token_ids: Sequence[int] | None,
+    start: int,
+    end: int,
+    block_size: int,
+    num_lookahead_tokens: int = 0,
+    token_ids_start: int = 0,
+) -> tuple[list[int], list[list[int]] | None]:
+    """Extract payload and hash dependencies from a stable token snapshot."""
+    start -= token_ids_start
+    end -= token_ids_start
+    if token_ids is None or start < 0 or end + num_lookahead_tokens > len(token_ids):
+        return [], None
+    dependencies = (
+        [
+            list(token_ids[i : i + num_lookahead_tokens])
+            for i in range(start + block_size, end + 1, block_size)
+        ]
+        if num_lookahead_tokens
+        else None
+    )
+    return list(token_ids[start:end]), dependencies
 
 
 class BlockRemoved(KVCacheEvent):

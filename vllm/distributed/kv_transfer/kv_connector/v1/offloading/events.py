@@ -25,9 +25,9 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    get_block_stored_event_tokens,
 )
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_hash_policy import BlockHashPolicy
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
@@ -114,10 +114,10 @@ class OffloadingEventsTracker:
         self,
         config: OffloadingKVEventsConfig,
         group_specs: dict[int, OffloadingEventGroupSpec] | None = None,
-        hash_policy: BlockHashPolicy | None = None,
+        num_hash_lookahead_tokens: int = 0,
     ):
         self.config = config
-        self.hash_policy = hash_policy or BlockHashPolicy()
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Static classification survives resets and never asserts prefix residency.
         self._group_specs = group_specs or {}
         self.self_describing_enabled = (
@@ -239,8 +239,12 @@ class OffloadingEventsTracker:
 
         lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
         lora_name = req.lora_request.name if req.lora_request is not None else None
-        token_ids, dependencies = self.hash_policy.event_tokens(
-            req.all_token_ids, chunk_start, boundary_tokens, tokens_per_hash
+        token_ids, dependencies = get_block_stored_event_tokens(
+            req.all_token_ids,
+            chunk_start,
+            boundary_tokens,
+            tokens_per_hash,
+            self.num_hash_lookahead_tokens,
         )
         meta = _OffloadEventMetadata(
             block_hashes=block_hashes,
@@ -336,8 +340,12 @@ class OffloadingEventsTracker:
         tok_start = chunk_idx * group_config.tokens_per_chunk
         tok_end = tok_start + group_config.tokens_per_chunk
         assert tok_end <= len(req.all_token_ids)
-        token_ids, dependencies = self.hash_policy.event_tokens(
-            req.all_token_ids, tok_start, tok_end, group_config.tokens_per_block
+        token_ids, dependencies = get_block_stored_event_tokens(
+            req.all_token_ids,
+            tok_start,
+            tok_end,
+            group_config.tokens_per_block,
+            self.num_hash_lookahead_tokens,
         )
 
         lora_id: int | None = None

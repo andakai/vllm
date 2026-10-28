@@ -243,12 +243,12 @@ until its dependency tokens are known. For block size 4 and lookahead 1,
 `ABCDE` can publish a key for `ABCD`; `ABCD` alone cannot. The stored KV
 payload still spans four positions, not five.
 
-`BlockHashPolicy` provides the shared hash coverage, reuse bounds, and event
-token payloads used by GPU prefix caching and canonical-key external caches.
-Its `cacheable_tokens` method intersects a supplied finalized prefix with
-available hashes. It does **not** prove that KV has finished computing or that
-a Mamba checkpoint exists. Callers retain their per-group materialization,
-alignment, and asynchronous-transfer checks.
+`Request.block_hashes` is the shared identity and availability contract. Its
+length bounds the prefix for which keys exist; a connector must also restrict
+stores to finalized KV and retain its existing per-group alignment, checkpoint,
+and asynchronous-transfer checks. A known hash does **not** establish that KV
+has finished computing. No separate cache policy object is passed between core,
+connectors, or workers.
 
 A connector declares `supports_request_block_hashes` when its cross-request
 cache uses core hashes as opaque identities and honors their available range.
@@ -260,7 +260,9 @@ MultiConnector enables it only when every child supports it.
 NIXL and Mooncake P/D transfer request-local KV rather than matching an external
 prefix by content. They also accept core hashing, and use
 `Request.truncate_prompt_tokens` when shortening a P-side prompt. This operation
-rebuilds the hashes and invalidates cached embedding hashes before scheduling;
+preserves hashes whose entire dependency window remains inside the shortened
+prompt. The existing core hasher discards only the invalid suffix, and embedding
+hashes crossing the new end are invalidated. The retained prompt is not rehashed;
 the connector only decides how many prompt tokens to hand off.
 
 For these connectors, dependency-aware hashing is enabled automatically when
@@ -277,3 +279,10 @@ callback to queue any newly eligible save and pins its source blocks until all
 workers complete. Publication timing, retries, and transfer ownership remain
 with the storage backend. KV events describe successful stores, and include
 dependency tokens separately from payload tokens.
+
+For an independently keyed external cache, preserving its previous behavior is
+not the same as migrating its external hits to lookahead hashes. The legacy
+core drop protects local prefix hits; it does not automatically validate the
+external hits reported by that connector. Such a connector needs a one-time
+adapter change to consume canonical keys and their available range before it
+can opt in. The storage backend need not interpret the dependency tokens.

@@ -12,7 +12,6 @@ from vllm.distributed.kv_events import (
 )
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
-from vllm.v1.core.kv_cache_hash_policy import BlockHashPolicy
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -20,6 +19,8 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    generate_block_hash_extra_keys,
+    generate_lookahead_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
@@ -171,7 +172,6 @@ class BlockPool:
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
-        self.hash_policy = BlockHashPolicy(hash_block_size, num_hash_lookahead_tokens)
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx, pool=self) for idx in range(num_gpu_blocks)
@@ -358,10 +358,17 @@ class BlockPool:
     def _generate_event_extra_keys(
         self, request: Request, start: int, end: int, start_mm_idx: int
     ) -> tuple[tuple[Any, ...] | None, int]:
-        return self.hash_policy.event_extra_keys(request, start, end, start_mm_idx)
+        # Event extra keys cover the same window as the block hash.
+        if self.num_hash_lookahead_tokens:
+            return generate_lookahead_block_hash_extra_keys(
+                request, start, end, end + self.num_hash_lookahead_tokens, start_mm_idx
+            )
+        return generate_block_hash_extra_keys(request, start, end, start_mm_idx)
 
     def _lookahead_token_ids(self, request: Request, block_end: int) -> list[int]:
-        return self.hash_policy.event_token_ids(request, block_end, block_end)
+        return request.all_token_ids[
+            block_end : block_end + self.num_hash_lookahead_tokens
+        ]
 
     def _build_block_stored_event(
         self,

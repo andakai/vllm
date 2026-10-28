@@ -24,7 +24,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
     _partial_tail_non_mamba_puts,
 )
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_hash_policy import BlockHashPolicy
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import KVConnectorBlockState
@@ -799,7 +798,7 @@ def test_from_request_tracker_load_overrides_caller_skip_save():
     req_meta = ReqMeta.from_request_tracker(
         tracker,
         block_size=16,
-        hash_policy=BlockHashPolicy(16),
+        hash_block_size=16,
         load_spec=load_spec,
         skip_save=False,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -825,7 +824,7 @@ def test_from_request_tracker_load_with_can_load_false_still_saves():
     req_meta = ReqMeta.from_request_tracker(
         tracker,
         block_size=16,
-        hash_policy=BlockHashPolicy(16),
+        hash_block_size=16,
         load_spec=load_spec,
         skip_save=False,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -853,7 +852,7 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
             ReqMeta.from_request_tracker(
                 tracker,
                 16,
-                BlockHashPolicy(16),
+                16,
                 save_partial_tail=True,
                 num_prompt_tokens=token_len,
             )
@@ -864,7 +863,7 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
     req_meta = ReqMeta.from_request_tracker(
         tracker,
         block_size=16,
-        hash_policy=BlockHashPolicy(16),
+        hash_block_size=16,
         load_spec=None,
         skip_save=False,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -883,7 +882,7 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
         ReqMeta.from_request_tracker(
             tracker,
             16,
-            BlockHashPolicy(16),
+            16,
             save_partial_tail=save_partial_tail,
             num_prompt_tokens=token_len,
         )
