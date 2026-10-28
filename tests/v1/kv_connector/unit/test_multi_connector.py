@@ -13,6 +13,7 @@ import torch
 from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig, SpeculativeConfig
+from vllm.config.attention import HiSparseConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -1080,16 +1081,19 @@ Options:
         "child_support",
         "num_lookahead",
         "prefix_caching",
-        "disabled",
+        "hisparse",
         "expected",
     ),
     [
         ([], 1, True, False, False),
         ([True, True], 1, True, False, True),
         ([True, False], 1, True, False, False),
+        ([True, False], 1, False, False, False),
         ([True, True], 1, False, False, True),
         ([True, True], 2, True, False, True),
-        ([True, True], 1, True, True, False),
+        ([True, True], 1, True, True, True),
+        ([True, True], 2, True, True, True),
+        ([True, False], 2, True, True, False),
     ],
 )
 @pytest.mark.parametrize("nested", [False, True])
@@ -1098,7 +1102,7 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
     child_support: list[bool],
     num_lookahead: int,
     prefix_caching: bool,
-    disabled: bool,
+    hisparse: bool,
     expected: bool,
     nested: bool,
     role: KVConnectorRole,
@@ -1123,12 +1127,17 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
     spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
     spec.method = "mtp"
     spec.draft_model_config = vllm_config.model_config
-    spec.disable_lookahead_block_hashes = disabled
     vllm_config.speculative_config = spec
     vllm_config.cache_config.enable_prefix_caching = prefix_caching
+    if hisparse:
+        vllm_config.attention_config.hisparse_config = HiSparseConfig()
 
-    assert vllm_config.num_hash_lookahead_tokens == (num_lookahead if expected else 0)
+    if not expected:
+        with pytest.raises(ValueError, match="does not support lookahead"):
+            _ = vllm_config.num_hash_lookahead_tokens
+        return
 
+    assert vllm_config.num_hash_lookahead_tokens == num_lookahead
     connector = KVConnectorFactory.create_connector(
         vllm_config,
         role,
@@ -1136,13 +1145,12 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
     )
 
     assert isinstance(connector, MultiConnector)
-    expected_tokens = num_lookahead if expected else 0
-    assert connector._vllm_config.num_hash_lookahead_tokens == expected_tokens
+    assert connector._vllm_config.num_hash_lookahead_tokens == num_lookahead
     for child in connector.sub_connectors:
-        assert child._vllm_config.num_hash_lookahead_tokens == expected_tokens
+        assert child._vllm_config.num_hash_lookahead_tokens == num_lookahead
         if isinstance(child, MultiConnector):
             assert all(
-                leaf._vllm_config.num_hash_lookahead_tokens == expected_tokens
+                leaf._vllm_config.num_hash_lookahead_tokens == num_lookahead
                 for leaf in child.sub_connectors
             )
 
