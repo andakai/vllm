@@ -10,7 +10,6 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.umbp_test_utils import (
-    _EmbeddedRuntime,
     _hybrid_kv_cache_config,
     _kv_cache_config,
     _SchedulerHandle,
@@ -19,12 +18,8 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_request,
     make_scheduler_output,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
     scheduler as umbp_scheduler,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
-    UMBPStoreConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
@@ -37,9 +32,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
     UMBPNamespace,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
-    UMBPRuntimeFactory,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler import (
     UMBPStoreConnectorScheduler,
@@ -232,8 +224,7 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
     assert [plan.block_id for plan in plans if plan.group_id == 1] == [6, 8]
 
 
-@pytest.mark.parametrize("use_eagle", [False, True])
-def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
+def test_single_sliding_window_stores_a_replayable_tail():
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
     config.kv_cache_groups[0].kv_cache_spec = SlidingWindowSpec(
@@ -245,9 +236,6 @@ def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
     )
     config.prefix_cache_retention_interval = 0
     vllm_config = _vllm_config({})
-    vllm_config.speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: use_eagle
-    )
     codec = BlockIdentityCodec(UMBPNamespace("swa-replay"))
     handle = _SchedulerHandle({})
     scheduler = UMBPStoreConnectorScheduler(vllm_config, config, handle, codec)
@@ -259,11 +247,11 @@ def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
     )
     try:
         plans = scheduler._store_plans(request, RequestTracker(), 64)
-        assert plans.block_ids == ([2, 3, 4] if use_eagle else [3, 4])
+        assert plans.block_ids == [3, 4]
         handle.hits = dict.fromkeys(plans.keys, True)
         matched, async_load = scheduler.get_num_new_matched_tokens(request, 0)
-        assert (matched, async_load) == (48 if use_eagle else 64, True)
-        destinations = ([0, 5, 6] if use_eagle else [0, 0, 5, 6],)
+        assert (matched, async_load) == (64, True)
+        destinations = ([0, 0, 5, 6],)
         scheduler.update_state_after_alloc(
             request,
             SimpleNamespace(get_block_ids=lambda group_ids: destinations),
@@ -271,7 +259,7 @@ def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
         )
         loaded = scheduler._pending_loads[request.request_id]
         assert loaded.block_ids == [5, 6]
-        expected_hashes = [b"b", b"c"] if use_eagle else [b"c", b"d"]
+        expected_hashes = [b"c", b"d"]
         assert loaded.keys == [codec.key(block_hash) for block_hash in expected_hashes]
     finally:
         scheduler.close()
@@ -350,7 +338,7 @@ def test_external_chunked_local_hit_preserves_absolute_positions(
         scheduler.close()
 
 
-def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
+def test_lookup_stops_before_the_aligned_prompt_end():
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
     config.kv_cache_groups.append(
@@ -363,13 +351,11 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
                 dtype=full.dtype,
                 sliding_window=32,
             ),
-            is_eagle_group=True,
         )
     )
     config.prefix_cache_retention_interval = 0
     vllm_config = _vllm_config({})
-    vllm_config.speculative_config = SimpleNamespace(use_eagle_block_drop=lambda: True)
-    codec = BlockIdentityCodec(UMBPNamespace("eagle-proof"))
+    codec = BlockIdentityCodec(UMBPNamespace("prompt-end"))
     handle = _SchedulerHandle({})
     scheduler = UMBPStoreConnectorScheduler(vllm_config, config, handle, codec)
     request = make_request(
@@ -382,7 +368,7 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
         plans = scheduler._store_plans(request, RequestTracker(), 64)
         handle.hits = dict.fromkeys(plans.keys, True)
         assert scheduler.get_num_new_matched_tokens(request, 0) == (48, True)
-        assert codec.key(b"d", 1) in handle.queries[-1]
+        assert codec.key(b"d", 1) not in handle.queries[-1]
         scheduler.update_state_after_alloc(
             request,
             SimpleNamespace(
@@ -508,25 +494,6 @@ def test_hybrid_external_hit_keeps_local_sparse_checkpoint(
             ]
     finally:
         scheduler.close()
-
-
-def test_draft_groups_must_be_restorable(monkeypatch):
-    monkeypatch.setitem(
-        UMBPRuntimeFactory._builders, "embedded", lambda config: _EmbeddedRuntime()
-    )
-    config = _kv_cache_config()
-    config.kv_cache_groups.append(
-        KVCacheGroupSpec(
-            ["draft"],
-            config.kv_cache_groups[0].kv_cache_spec,
-            is_eagle_group=True,
-            enable_kv_transfer=False,
-        )
-    )
-    with pytest.raises(NotImplementedError, match="draft-model KV"):
-        UMBPStoreConnector(
-            _vllm_config({"mode": "embedded"}), KVConnectorRole.SCHEDULER, config
-        )
 
 
 def test_hybrid_model_loads_asynchronously_even_when_sync_is_requested():

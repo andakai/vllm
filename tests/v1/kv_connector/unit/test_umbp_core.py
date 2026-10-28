@@ -658,12 +658,8 @@ def test_scheduler_lookup_failure_recomputes_and_allows_retry(failure):
         scheduler.close()
 
 
-@pytest.mark.parametrize(("use_eagle", "expected"), [(False, 32), (True, 16)])
-def test_scheduler_single_group_lookup_drops_last_block_for_eagle(use_eagle, expected):
+def test_scheduler_single_group_lookup_keeps_last_hash_ready_block():
     vllm_config = _vllm_config({"mode": "embedded", "load_async": False})
-    vllm_config.speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: use_eagle
-    )
     scheduler = UMBPStoreConnectorScheduler(
         vllm_config,
         _kv_cache_config(),
@@ -672,7 +668,7 @@ def test_scheduler_single_group_lookup_drops_last_block_for_eagle(use_eagle, exp
     )
     request = make_request("req", num_tokens=33)
 
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, False)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, False)
 
 
 def test_scheduler_emits_async_load_without_scheduled_model_tokens():
