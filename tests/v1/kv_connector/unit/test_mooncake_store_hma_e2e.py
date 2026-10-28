@@ -94,6 +94,8 @@ def _minimal_vllm_config(cache_block_size=16):
     # Without this, MagicMock's truthy use_eagle() triggers the coordinator's
     # "use_eagle && nothing annotated → flag all groups" fallback.
     cfg.speculative_config = None
+    cfg.use_eagle_block_drop = False
+    cfg.num_hash_lookahead_tokens = 0
     return cfg
 
 

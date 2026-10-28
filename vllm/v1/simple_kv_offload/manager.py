@@ -27,7 +27,6 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     ExternalBlockHash,
-    generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
@@ -80,6 +79,7 @@ class BlockStoreMeta:
     lora_name: str | None
     extra_keys: tuple[Any, ...] | None
     block_size: int | None = None
+    lookahead_token_ids: list[int] | None = None
 
 
 @dataclass
@@ -204,15 +204,11 @@ class SimpleCPUOffloadScheduler:
             "disk" if disk_capacity_bytes > 0 else "cpu",
         )
 
-        spec_config = vllm_config.speculative_config
-        use_eagle_block_drop = (
-            spec_config is not None and spec_config.use_eagle_block_drop()
-        )
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            use_eagle=use_eagle_block_drop,
+            use_eagle=vllm_config.use_eagle_block_drop,
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -221,6 +217,7 @@ class SimpleCPUOffloadScheduler:
             hash_block_size=self.hash_block_size,
             allow_partial_hash_hits=not lazy_offload,
             num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
         )
         self.group_block_sizes = self.cpu_coordinator.group_block_sizes
         # FA group's own resolved block_size; divides scheduler_block_size (the
@@ -407,7 +404,10 @@ class SimpleCPUOffloadScheduler:
             return 0, False
         # Must recompute at least the last token, matching the logic in
         # kv_cache_manager.get_computed_blocks().
-        max_hit_len = request.num_tokens - 1 - num_computed_tokens
+        max_hit_len = (
+            self.cpu_block_pool.hash_policy.reusable_tokens(request.num_tokens)
+            - num_computed_tokens
+        )
         if max_hit_len <= 0:
             return 0, False
         cpu_hit_blocks, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
@@ -896,6 +896,9 @@ class SimpleCPUOffloadScheduler:
             cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
                 confirmed_tokens, g
             )
+            cacheable_tokens = self.cpu_block_pool.hash_policy.cacheable_tokens(
+                request.block_hashes, cacheable_tokens
+            )
             ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, group_size
@@ -937,18 +940,26 @@ class SimpleCPUOffloadScheduler:
                         else maybe_convert_block_hash(resolved_hashes[i - 1])
                     )
                     lora_req = request.lora_request
-                    extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                        request, token_start, token_end, curr_mm_idx
+                    event_tokens, lookahead_token_ids = (
+                        self.cpu_block_pool.hash_policy.event_tokens(
+                            request.all_token_ids, token_start, token_end, group_size
+                        )
+                    )
+                    extra_keys, curr_mm_idx = (
+                        self.cpu_block_pool.hash_policy.event_extra_keys(
+                            request, token_start, token_end, curr_mm_idx
+                        )
                     )
                     meta_by_hash = {
                         primary_block_hash: BlockStoreMeta(
-                            token_ids=list(
-                                request.all_token_ids[token_start:token_end]
-                            ),
+                            token_ids=event_tokens,
                             parent_block_hash=parent_hash,
                             lora_id=lora_req.adapter_id if lora_req else None,
                             lora_name=lora_req.name if lora_req else None,
                             extra_keys=extra_keys,
+                            lookahead_token_ids=(
+                                lookahead_token_ids[0] if lookahead_token_ids else None
+                            ),
                         )
                     }
                     first_hash_idx = token_start // self.hash_block_size
@@ -961,8 +972,16 @@ class SimpleCPUOffloadScheduler:
                             continue
                         hash_start = hash_idx * self.hash_block_size
                         hash_end = hash_start + self.hash_block_size
+                        secondary_tokens, secondary_lookahead = (
+                            self.cpu_block_pool.hash_policy.event_tokens(
+                                request.all_token_ids,
+                                hash_start,
+                                hash_end,
+                                self.hash_block_size,
+                            )
+                        )
                         secondary_extra_keys, secondary_mm_idx = (
-                            generate_block_hash_extra_keys(
+                            self.cpu_block_pool.hash_policy.event_extra_keys(
                                 request,
                                 hash_start,
                                 hash_end,
@@ -970,7 +989,7 @@ class SimpleCPUOffloadScheduler:
                             )
                         )
                         meta_by_hash[block_hash] = BlockStoreMeta(
-                            token_ids=list(request.all_token_ids[hash_start:hash_end]),
+                            token_ids=secondary_tokens,
                             parent_block_hash=(
                                 None
                                 if hash_idx == 0
@@ -982,6 +1001,9 @@ class SimpleCPUOffloadScheduler:
                             lora_name=lora_req.name if lora_req else None,
                             extra_keys=secondary_extra_keys,
                             block_size=self.hash_block_size,
+                            lookahead_token_ids=(
+                                secondary_lookahead[0] if secondary_lookahead else None
+                            ),
                         )
                     block_meta.append(meta_by_hash)
 
@@ -1192,6 +1214,13 @@ class SimpleCPUOffloadScheduler:
                                 get_kv_cache_spec_sliding_window(spec)
                             ),
                             locality="LOCAL",
+                            lookahead_token_ids=(
+                                [meta.lookahead_token_ids]
+                                if token_ids
+                                and meta is not None
+                                and meta.lookahead_token_ids is not None
+                                else None
+                            ),
                         )
                     )
 
@@ -1311,8 +1340,16 @@ class SimpleCPUOffloadScheduler:
         if not self.cpu_coordinator.enable_partial_hash_hits:
             return None
         assert self._gpu_block_pool is not None
-        boundary_tokens = (
-            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+        manager = self.cpu_coordinator.single_type_managers[self.fa_gidx]
+        token_limit = (
+            request.num_prompt_tokens
+            if manager.use_eagle
+            else self.cpu_block_pool.hash_policy.reusable_tokens(
+                request.num_prompt_tokens
+            )
+        )
+        boundary_tokens = self.cpu_block_pool.hash_policy.cacheable_tokens(
+            request.block_hashes, token_limit, self.hash_block_size
         )
         if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
             return None

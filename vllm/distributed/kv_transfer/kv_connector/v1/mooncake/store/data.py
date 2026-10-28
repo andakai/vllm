@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.v1.core.kv_cache_hash_policy import BlockHashPolicy
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashListWithBlockSize,
@@ -765,6 +766,7 @@ class ReqMeta:
     token_ids: list[int] | None = None
     # Absolute request offset represented by token_ids[0].
     token_ids_start: int = 0
+    hash_policy: BlockHashPolicy = field(default_factory=BlockHashPolicy)
     num_prompt_tokens: int | None = None
     # Total prefill tokens, including generated tokens replayed after preemption.
     prefill_end_tokens: int | None = None
@@ -789,6 +791,7 @@ class ReqMeta:
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
+        hash_policy: BlockHashPolicy,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
@@ -804,7 +807,9 @@ class ReqMeta:
 
         token_ids_start = tracker.num_saved_tokens
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
-        num_tokens_to_save = input_token_len // block_size * block_size
+        num_tokens_to_save = hash_policy.cacheable_tokens(
+            block_hashes, input_token_len, block_size
+        )
 
         publish_tail = (
             save_partial_tail
@@ -856,6 +861,7 @@ class ReqMeta:
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
+            hash_policy=hash_policy,
             token_ids=token_ids,
             token_ids_start=token_ids_start,
             num_prompt_tokens=num_prompt_tokens,

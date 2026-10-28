@@ -159,6 +159,8 @@ def test_swa_offload_window_covers_unaligned_hit(
     )
     config = SimpleNamespace(
         speculative_config=None,
+        use_eagle_block_drop=eagle,
+        num_hash_lookahead_tokens=0,
         cache_config=SimpleNamespace(
             enable_prefix_caching=True, prefix_cache_retention_interval=None
         ),
