@@ -682,14 +682,30 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.use_eagle_block_drop()
             or speculative_config.disable_lookahead_block_hashes
-            or not self.cache_config.enable_prefix_caching
         ):
             return 0
-        # KV connectors, including HiSparse's, keep the legacy hashes.
-        if self.kv_transfer_config is not None:
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            if not connector_cls.supports_request_block_hashes(kv_transfer_config):
+                return 0
+        elif not self.cache_config.enable_prefix_caching:
             return 0
         # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
+
+    @property
+    def use_eagle_block_drop(self) -> bool:
+        """Whether cache lookup needs the legacy trailing-block proof."""
+        return (
+            self.speculative_config is not None
+            and self.speculative_config.use_eagle_block_drop()
+            and not self.num_hash_lookahead_tokens
+        )
 
     @property
     def uniform_decode_query_len(self) -> int:

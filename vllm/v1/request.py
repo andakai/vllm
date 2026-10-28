@@ -287,6 +287,23 @@ class Request:
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
 
+    def truncate_prompt_tokens(self, num_tokens: int) -> None:
+        """Shorten an uncomputed prompt and rebuild its derived hash state."""
+        assert 0 < num_tokens < self.num_prompt_tokens
+        assert self.num_computed_tokens == 0 and not self._output_token_ids
+        if self.prompt_token_ids is not None:
+            del self.prompt_token_ids[num_tokens:]
+        if self.prompt_embeds is not None:
+            self.prompt_embeds = self.prompt_embeds[:num_tokens]
+        if self.prompt_is_token_ids is not None:
+            del self.prompt_is_token_ids[num_tokens:]
+        del self._all_token_ids[num_tokens:]
+        self.num_prompt_tokens = num_tokens
+        self.block_hashes.clear()
+        self._prompt_embeds_per_block_hashes.clear()
+        self.update_block_hashes()
+        self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
+
     @property
     def use_structured_output(self) -> bool:
         return self.structured_output_request is not None

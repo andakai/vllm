@@ -321,7 +321,7 @@ class Scheduler(SchedulerInterface):
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
             self.use_eagle = speculative_config.use_eagle()
-            self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
+            self.use_eagle_block_drop = vllm_config.use_eagle_block_drop
             if (
                 speculative_config.needs_eagle_block_drop()
                 and speculative_config.disable_eagle_block_drop
@@ -333,9 +333,6 @@ class Scheduler(SchedulerInterface):
                 )
 
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
-        if self.num_hash_lookahead_tokens:
-            # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
-            self.use_eagle_block_drop = False
 
         # Create the KV cache manager.
         if hash_block_size is None:

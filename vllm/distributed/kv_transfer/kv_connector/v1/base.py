@@ -194,6 +194,20 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def supports_request_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector accepts core-owned cache identities and bounds.
+
+        Cross-request caches must use ``request.block_hashes`` as opaque keys
+        and honor their available range, even when fewer hashes than computed
+        blocks exist. Request-local transfers may opt in when they preserve
+        Request's hash state on mutation. Independently keyed caches default
+        to False and retain legacy hashing.
+        """
+        return False
+
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
@@ -636,7 +650,7 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:

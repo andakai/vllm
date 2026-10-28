@@ -299,7 +299,10 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
+        max_cache_hit_length = min(
+            request.get_max_cache_hit_length(max_cache_hit_length),
+            self.block_pool.hash_policy.reusable_tokens(request.num_tokens),
+        )
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
@@ -360,7 +363,10 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
-        max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
+        max_cache_hit_length = min(
+            request.get_max_cache_hit_length(max_cache_hit_length),
+            self.block_pool.hash_policy.reusable_tokens(request.num_tokens),
+        )
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, max_cache_hit_length
