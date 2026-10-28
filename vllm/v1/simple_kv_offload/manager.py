@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
+    get_reusable_prefix_length,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import (
@@ -204,18 +205,11 @@ class SimpleCPUOffloadScheduler:
             "disk" if disk_capacity_bytes > 0 else "cpu",
         )
 
-        spec_config = vllm_config.speculative_config
         num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
-        use_eagle_block_drop = (
-            spec_config is not None
-            and spec_config.use_eagle_block_drop()
-            and not num_hash_lookahead_tokens
-        )
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            use_eagle=use_eagle_block_drop,
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -882,6 +876,13 @@ class SimpleCPUOffloadScheduler:
         )
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
+        # Mimic the GPU KV cache manager's cacheable prefix.
+        cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
+            confirmed_tokens
+        )
+        cacheable_tokens = min(
+            cacheable_tokens, len(request.block_hashes) * self.hash_block_size
+        )
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
@@ -896,13 +897,6 @@ class SimpleCPUOffloadScheduler:
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
             group_size = self.group_block_sizes[g]
-            # Mimic the GPU KV cache manager's cacheable prefix.
-            cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
-                confirmed_tokens, g
-            )
-            cacheable_tokens = min(
-                cacheable_tokens, len(request.block_hashes) * self.hash_block_size
-            )
             ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, group_size
@@ -1341,15 +1335,13 @@ class SimpleCPUOffloadScheduler:
         if not self.cpu_coordinator.enable_partial_hash_hits:
             return None
         assert self._gpu_block_pool is not None
-        manager = self.cpu_coordinator.single_type_managers[self.fa_gidx]
-        token_limit = (
-            request.num_prompt_tokens
-            if manager.use_eagle
-            else request.num_prompt_tokens - 1
-        )
-        boundary_tokens = (
-            min(token_limit // self.hash_block_size, len(request.block_hashes))
-            * self.hash_block_size
+        boundary_tokens = min(
+            get_reusable_prefix_length(
+                request.num_prompt_tokens,
+                self.hash_block_size,
+                num_hash_lookahead_tokens=self.cpu_block_pool.num_hash_lookahead_tokens,
+            ),
+            len(request.block_hashes) * self.hash_block_size,
         )
         if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
             return None

@@ -21,7 +21,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
-    replay_boundaries,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
@@ -41,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
+    get_reusable_prefix_length,
     iter_layer_specs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -251,21 +251,6 @@ class UMBPStoreConnectorScheduler:
             for group_id in kv_cache_config.prefix_cacheable_group_ids
         ]
         model_config = getattr(vllm_config, "model_config", None)
-        speculative_config = getattr(vllm_config, "speculative_config", None)
-        use_eagle = bool(
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
-        )
-        self.use_eagle = use_eagle
-        explicit_eagle_groups = {
-            group_id
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.is_eagle_group
-        }
-        self._eagle_store_groups = (
-            explicit_eagle_groups
-            if explicit_eagle_groups or not use_eagle
-            else set(kv_cache_config.prefix_cacheable_group_ids)
-        )
         max_model_len = getattr(
             model_config,
             "max_model_len",
@@ -281,7 +266,6 @@ class UMBPStoreConnectorScheduler:
                 kv_cache_config=lookup_config,
                 max_model_len=max_model_len,
                 max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-                use_eagle=use_eagle,
                 enable_caching=True,
                 enable_kv_cache_events=False,
                 dcp_world_size=dcp_size,
@@ -474,9 +458,6 @@ class UMBPStoreConnectorScheduler:
                 if group_hits[index]:
                     matched_units = index + 1
                     break
-            if self.use_eagle:
-                # As core's coordinator: the drafter recomputes the last block.
-                matched_units = max(0, matched_units - units_per_block)
             need_to_load = matched_units * self._lookup_units[group_id]
             block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
         else:
@@ -522,8 +503,6 @@ class UMBPStoreConnectorScheduler:
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
         lookup_limit = request.num_tokens - 1
-        if self.use_eagle and self._lookup_coordinator is not None:
-            lookup_limit = min(request.num_tokens, len(hashes) * self.hash_block_size)
         for group_id, unit in self._lookup_units.items():
             group_objects = []
             for token_end in range(local_tokens + unit, lookup_limit + 1, unit):
@@ -1133,16 +1112,13 @@ class UMBPStoreConnectorScheduler:
         reachable_boundaries = (
             ()
             if num_prompt_tokens is None
-            else replay_boundaries(
-                num_prompt_tokens, self.block_size, use_eagle=self.use_eagle
-            )
+            else (get_reusable_prefix_length(num_prompt_tokens),)
         )
         mask = manager_cls.reachable_block_mask(
             start_block=indices.start,
             end_block=indices.stop,
             alignment_tokens=self.block_size,
             kv_cache_spec=spec,
-            use_eagle=group_id in self._eagle_store_groups,
             retention_interval=self._retention_interval,
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self._dcp_size,

@@ -1132,20 +1132,17 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         ),
         pytest.param({"enable_prefix_caching": False}, 0, id="no-prefix-caching"),
         pytest.param({"num_prefill_lookahead_tokens": 2}, 2, id="multi-module-mtp"),
+        pytest.param({"kv_connector": True}, 1, id="kv-connector"),
         pytest.param(
-            {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
+            {"kv_connector": True, "enable_prefix_caching": False},
+            1,
+            id="connector-without-local-cache",
         ),
-        pytest.param({"kv_connector": True}, 0, id="kv-connector"),
     ],
 )
 def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
-    speculative_config = object.__new__(SpeculativeConfig)
-    object.__setattr__(speculative_config, "method", overrides.get("method", "mtp"))
-    object.__setattr__(
-        speculative_config,
-        "disable_lookahead_block_hashes",
-        overrides.get("disable_lookahead_block_hashes", False),
-    )
+    speculative_config = SpeculativeConfig(method="ngram", num_speculative_tokens=2)
+    speculative_config.method = overrides.get("method", "mtp")
     vllm_config = cast(
         VllmConfig,
         SimpleNamespace(
@@ -1422,22 +1419,6 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
     with pytest.raises(AssertionError):
         type(draft).merge([draft, replace(draft, dcp_sharded=True)])
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        new_kv_cache_spec(),
-        new_mla_spec(),
-        SinkFullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32, sink_len=4
-        ),
-    ],
-)
-def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
-    draft = replace(target, is_draft=True)
-    assert draft == target and hash(draft) == hash(target)
-    assert type(target).merge([target, draft]) == target
 
 
 @pytest.mark.parametrize(

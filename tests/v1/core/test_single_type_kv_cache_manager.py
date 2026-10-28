@@ -267,8 +267,6 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
         kv_cache_group_id=0,
         scheduler_block_size=block_size,
     )
-    # MTP/EAGLE moves the checkpoint one block below the last full block.
-    manager.drop_eagle_checkpoint_block = True
     init_none_hash(sha256)
     prompt_tokens = 6 * block_size + 50
     request = Request(
@@ -288,7 +286,7 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
             request,
             end,
             retention_interval=retention_interval,
-            replay_boundaries=[5 * block_size],
+            replay_boundary=5 * block_size,
         )
         request.num_computed_tokens = end
 
@@ -395,7 +393,7 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
         )
         assert manager.allocate_new_blocks(request_id, num_tokens, num_tokens) == []
 
-    manager.cache_blocks(request_id, 1024, replay_boundaries=(0,))
+    manager.cache_blocks(request_id, 1024, replay_boundary=0)
     manager.remove_skipped_blocks(request_id, 1024)
     assert manager.get_num_skipped_tokens(1024) == 0
     assert manager.req_to_blocks[request_id] == blocks
@@ -526,7 +524,6 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=chunked_local_attention_spec,
-            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
         assert len(computed_blocks) == expect_length
@@ -597,7 +594,6 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=sliding_window_spec,
-            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
         assert len(computed_blocks) == expect_length
@@ -663,7 +659,6 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
         kv_cache_group_ids=[0],
         block_pool=block_pool,
         kv_cache_spec=sliding_window_spec,
-        drop_eagle_block=False,
         alignment_tokens=hash_block_size,
     )
 

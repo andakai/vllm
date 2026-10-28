@@ -30,6 +30,14 @@ In the example above, the KV cache in the first block can be uniquely identified
     - `xxhash`: Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
     - `xxhash_cbor` combines canonical CBOR serialization with xxHash for reproducible hashing. Requires the optional `xxhash` package.    
 
+## Speculative decoding and lookahead hashes
+
+EAGLE, EAGLE3, and MTP draft KV can depend on finalized tokens after a block boundary. Their prefix-cache keys therefore include those lookahead tokens automatically. Single-module drafting includes one token; multi-module MTP includes the configured number of speculative tokens. Gemma4 MTP is an exception: its Q-only assistant reads the target's KV without writing separate draft KV, so it uses ordinary hashes and does not require connector lookahead support. Its prefill input lookahead is unchanged. A key becomes available only after all of its lookahead tokens are known, and KV is published only when the corresponding computation has completed. Cache lookup reuses the resulting proven boundary without dropping another block.
+
+This also applies when a KV connector is configured, including when local prefix caching is disabled. OffloadingConnector, SimpleCPUOffloadConnector, MooncakeStoreConnector, NixlConnector, and MooncakeConnector support lookahead hashes. MultiConnector requires every child connector to support them. An unsupported connector used with a drafter that requires lookahead hashes raises an error when `VllmConfig.num_hash_lookahead_tokens` is resolved during initialization; use a supporting connector or disable speculative decoding. Custom connectors must opt in through `supports_lookahead_block_hashes` and honor the configured `num_hash_lookahead_tokens` when publishing and looking up keys.
+
+The experimental `disable_eagle_block_drop` and `disable_lookahead_block_hashes` options have been removed. DFlash, DSpark, and non-speculative decoding retain their existing hash behavior. All instances sharing an external KV cache must use compatible hash settings, including the lookahead count.
+
 **A hashing example with multi-modality inputs**  
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
 
@@ -234,3 +242,13 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 **Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
 ![Example Time 6](../assets/design/prefix_caching/example-time-7.png)
+
+### Shared-prefix Mamba checkpoints
+
+For hybrid models with Mamba `align` caching and fine-grained prefix matching,
+`--enable-mamba-shared-prefix-checkpoint` also preserves state at an observed
+shared-prefix junction. This opt-in optimization works with or without
+speculative decoding; it does not require draft-layer annotations. It remains
+disabled for multi-module MTP re-prefill and backends with internal prefill
+checkpoint slots, which may export a state before the chunk-end junction.
+The scheduler only stops at a junction that the cache manager can publish.

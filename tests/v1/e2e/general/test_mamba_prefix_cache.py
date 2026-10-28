@@ -1401,3 +1401,107 @@ def test_mamba_prefix_cache_mrv2_async_flashinfer(monkeypatch: pytest.MonkeyPatc
         async_scheduling=True,
         additional_config={"gdn_prefill_backend": "flashinfer"},
     )
+
+
+@pytest.mark.parametrize("prefill_backend", ["triton", "flashinfer"])
+@create_new_process_for_each_test("spawn")
+def test_mamba_prefix_cache_mrv2_shared_junction(monkeypatch, prefill_backend):
+    """A real hybrid model reuses a junction without changing its continuation."""
+    from tests.models.utils import check_logprobs_close
+    from vllm.v1.core.kv_cache_utils import get_group_id
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    envs.disable_envs_cache()
+    engine = LLM(
+        model="Qwen/Qwen3.5-0.8B",
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        enable_mamba_shared_prefix_checkpoint=True,
+        block_size=512,
+        prefix_match_unit=32,
+        max_model_len=4096,
+        max_num_batched_tokens=1024,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.25,
+        additional_config={"gdn_prefill_backend": prefill_backend},
+        seed=42,
+    )
+    try:
+        assert isinstance(engine.llm_engine.engine_core, InprocClient)
+        scheduler = engine.llm_engine.engine_core.engine_core.scheduler
+        assert isinstance(scheduler, Scheduler)
+        assert scheduler.mamba_shared_prefix_checkpoint == (prefill_backend == "triton")
+        assert scheduler.num_hash_lookahead_tokens == 0
+        assert scheduler.mamba_has_prefill_checkpoint_blocks == (
+            prefill_backend == "flashinfer"
+        )
+        tokenizer = engine.get_tokenizer()
+        prefix = (
+            tokenizer.encode("The quick brown fox jumps over the lazy dog. ") * 300
+        )[:2600]
+        shared = prefix[:2017]
+        consumer = shared + [tokenizer.encode(" blue")[-1]] * 583
+        sibling = shared + [tokenizer.encode(" green")[-1]] * 583
+        params = SamplingParams(
+            temperature=0, max_tokens=16, ignore_eos=True, logprobs=5
+        )
+        cold = engine.generate([TokensPrompt(prompt_token_ids=sibling)], params)[0]
+        assert engine.reset_prefix_cache()
+        seed_params = SamplingParams(temperature=0, max_tokens=1, ignore_eos=True)
+        engine.generate([TokensPrompt(prompt_token_ids=prefix[:2020])], seed_params)
+        # Independent group eviction leaves an attention-only junction to recover.
+        cache = scheduler.kv_cache_manager
+        mamba_groups = {
+            manager.kv_cache_group_id
+            for manager in cache.coordinator.single_type_managers
+            if isinstance(manager, MambaManager)
+        }
+        junction_blocks = [
+            block
+            for block in cache.block_pool.blocks
+            if block.block_hash is not None and block.block_hash_num_tokens == 2016
+        ]
+        evicted = {
+            block.block_id
+            for block in junction_blocks
+            if block.block_hash is not None
+            and get_group_id(block.block_hash) in mamba_groups
+        }
+        assert evicted and len(evicted) < len(junction_blocks)
+        cache.block_pool.evict_blocks(evicted)
+        first = engine.generate([TokensPrompt(prompt_token_ids=consumer)], seed_params)[
+            0
+        ]
+        warm = engine.generate([TokensPrompt(prompt_token_ids=sibling)], params)[0]
+        assert first.num_cached_tokens is not None
+        assert warm.num_cached_tokens is not None
+        assert first.num_cached_tokens < 2016
+        if prefill_backend == "triton":
+            assert warm.num_cached_tokens == 2016
+        else:
+            assert warm.num_cached_tokens < 2016
+        assert len(cold.outputs[0].token_ids) == len(warm.outputs[0].token_ids) == 16
+        check_logprobs_close(
+            outputs_0_lst=[
+                (
+                    list(cold.outputs[0].token_ids),
+                    cold.outputs[0].text,
+                    cold.outputs[0].logprobs,
+                )
+            ],
+            outputs_1_lst=[
+                (
+                    list(warm.outputs[0].token_ids),
+                    warm.outputs[0].text,
+                    warm.outputs[0].logprobs,
+                )
+            ],
+            name_0="cold",
+            name_1="junction reuse",
+        )
+    finally:
+        del engine
+        cleanup_dist_env_and_memory()
