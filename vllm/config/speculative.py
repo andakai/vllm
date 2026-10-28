@@ -470,17 +470,6 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
-    disable_eagle_block_drop: bool = False
-    """Disable dropping the trailing prefix-cache block for EAGLE-like
-    speculative methods. This is an experimental option for measuring the
-    acceptance-rate impact of reusing that block. It does not disable the
-    speculative drafter itself."""
-    disable_lookahead_block_hashes: bool = False
-    """Disable lookahead block hashes for EAGLE-like speculative methods and
-    fall back to dropping the trailing prefix-cache block. Lookahead hashes
-    also cover the tokens the drafter reads after each block, so engines
-    sharing a KV store and external consumers of KV cache events must use the
-    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
     MTP). "fp8" uses per-row weight and per-token activation scales on the
@@ -2081,14 +2070,10 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
-    def needs_eagle_block_drop(self) -> bool:
-        """Whether draft KV at a position depends on the next token.
-
-        EAGLE-style drafters build a position's draft KV from its hidden state
-        and the next token. DFlash/DSpark build it from the target hidden state
-        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
-        """
-        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
+    def use_hash_lookahead(self) -> bool:
+        """Whether the draft method requires lookahead-aware KV hashes."""
+        # Gemma4 MTP is Q-only and reuses the target's KV without writing it.
+        return self.method in ("eagle", "eagle3", "mtp") and not self.use_gemma4_mtp()
 
     def is_xpress(self) -> bool:
         """Whether the dflash draft carries an XPress refiner.
@@ -2105,10 +2090,6 @@ class SpeculativeConfig:
                 for arch in self.draft_model_config.architectures
             )
         )
-
-    def use_eagle_block_drop(self) -> bool:
-        """Whether the volatile trailing prefix-cache block should be dropped."""
-        return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
 
     def draft_shares_target_positions(self) -> bool:
         """Whether the draft's max_position_embeddings is raised to the

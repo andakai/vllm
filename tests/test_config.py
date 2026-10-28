@@ -3713,28 +3713,119 @@ def test_draft_sample_method_probabilistic_is_accepted():
 
 
 @pytest.mark.parametrize(
-    ("method", "drops_block"),
-    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+    ("method", "needs_lookahead"),
+    [
+        ("eagle", True),
+        ("eagle3", True),
+        ("mtp", True),
+        ("dflash", False),
+        ("dspark", False),
+    ],
 )
-@pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
-def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
+def test_draft_kv_lookahead_dependency(
     method: str,
-    drops_block: bool,
-    disable_eagle_block_drop: bool,
+    needs_lookahead: bool,
 ):
     # Start from an ngram config to avoid loading model metadata: these predicates
-    # depend only on the speculative method and the new switch.
+    # depend only on the speculative method.
     speculative_config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=3,
-        disable_eagle_block_drop=disable_eagle_block_drop,
     )
     speculative_config.method = method
 
     assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is (
-        drops_block and not disable_eagle_block_drop
+    assert speculative_config.use_hash_lookahead() is needs_lookahead
+
+
+@pytest.fixture
+def gemma4_mtp_config(tmp_path: Path):
+    from transformers import Gemma4AssistantConfig, Gemma4TextConfig
+
+    text_config = Gemma4TextConfig(
+        architectures=["Gemma4ForCausalLM"],
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        global_head_dim=16,
+        vocab_size=256,
+        max_position_embeddings=128,
+        layer_types=["sliding_attention", "full_attention"],
+        hidden_size_per_layer_input=0,
+        vocab_size_per_layer_input=0,
+        enable_moe_block=False,
+        use_double_wide_mlp=False,
     )
+    target_path, draft_path = tmp_path / "target", tmp_path / "assistant"
+    text_config.save_pretrained(target_path)
+    Gemma4AssistantConfig(
+        architectures=["Gemma4AssistantForCausalLM"],
+        text_config=text_config.to_dict(),
+        backbone_hidden_size=64,
+    ).save_pretrained(draft_path)
+    target = ModelConfig(
+        model=str(target_path), tokenizer_mode="skip", max_model_len=128
+    )
+    parallel = ParallelConfig(distributed_executor_backend="uni")
+    spec = SpeculativeConfig(
+        method="mtp",
+        model=str(draft_path),
+        num_speculative_tokens=2,
+        target_model_config=target,
+        target_parallel_config=parallel,
+    )
+    return VllmConfig(
+        model_config=target,
+        parallel_config=parallel,
+        speculative_config=spec,
+        cache_config=CacheConfig(enable_prefix_caching=True),
+        scheduler_config=SchedulerConfig(max_model_len=128, is_encoder_decoder=False),
+    )
+
+
+def test_gemma4_mtp_uses_target_kv_hashes(gemma4_mtp_config):
+    config = gemma4_mtp_config
+    assert config.speculative_config.use_gemma4_mtp()
+    assert config.speculative_config.use_eagle()
+    assert config.num_prefill_lookahead_tokens == 1
+    assert config.num_hash_lookahead_tokens == 0
+
+
+@pytest.mark.parametrize("prefix_caching", [False, True])
+@pytest.mark.parametrize("hma", [False, True])
+def test_gemma4_mtp_connector_does_not_require_lookahead(
+    gemma4_mtp_config, prefix_caching, hma, tmp_path
+):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+        ExampleConnector,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    config = gemma4_mtp_config
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.scheduler_config.disable_hybrid_kv_cache_manager = not hma
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="ExampleConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+    )
+    kv_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    if hma:
+        with pytest.raises(ValueError, match="does not support HMA"):
+            KVConnectorFactory.create_connector(
+                config, KVConnectorRole.SCHEDULER, kv_config
+            )
+    else:
+        connector = KVConnectorFactory.create_connector(
+            config, KVConnectorRole.SCHEDULER, kv_config
+        )
+        assert isinstance(connector, ExampleConnector)
+        assert config.num_hash_lookahead_tokens == 0
 
 
 def test_draft_sample_method_gumbel_is_rejected():
@@ -4387,4 +4478,39 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
                 parallel_config, "linear_attention"
             )
             == len(layer_types) - expected_attention
+        )
+
+
+@pytest.mark.parametrize(
+    "option", ["disable_eagle_block_drop", "disable_lookahead_block_hashes"]
+)
+def test_removed_eagle_hash_options_are_rejected(option):
+    with pytest.raises(ValidationError, match="Unexpected keyword argument"):
+        SpeculativeConfig(method="ngram", num_speculative_tokens=1, **{option: True})
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_umbp_rejects_lookahead_before_runtime_creation(gemma4_mtp_config, direct):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
+        UMBPStoreConnector,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    config = gemma4_mtp_config
+    config.speculative_config.method = "eagle3"
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        kv_connector_module_path="vllm.distributed.kv_transfer.kv_connector.v1.umbp",
+    )
+    with pytest.raises(ValueError, match="does not support lookahead"):
+        _ = config.num_hash_lookahead_tokens
+    create = UMBPStoreConnector if direct else KVConnectorFactory.create_connector
+    with pytest.raises(ValueError, match="does not support lookahead"):
+        create(
+            config,
+            KVConnectorRole.SCHEDULER,
+            KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         )
