@@ -676,13 +676,9 @@ class VllmConfig:
 
     @property
     def num_hash_lookahead_tokens(self) -> int:
-        """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
-        speculative_config = self.speculative_config
-        if (
-            speculative_config is None
-            or not speculative_config.use_eagle_block_drop()
-            or speculative_config.disable_lookahead_block_hashes
-        ):
+        """Finalized tokens beyond each block needed to identify its draft KV."""
+        spec = self.speculative_config
+        if spec is None or not spec.requires_lookahead_kv_hashes():
             return 0
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is not None:
@@ -692,10 +688,13 @@ class VllmConfig:
 
             connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
             if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
-                return 0
+                raise ValueError(
+                    f"Connector {connector_cls.__name__} does not support lookahead "
+                    "block hashes required by EAGLE/EAGLE3/MTP. Use a supporting "
+                    "connector or disable speculative decoding."
+                )
         elif not self.cache_config.enable_prefix_caching:
             return 0
-        # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
 
     @property
