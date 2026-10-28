@@ -336,6 +336,8 @@ def _make_vllm_config(
         ),
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
     )
 
 
@@ -3813,6 +3815,8 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
     ]
     config = SimpleNamespace(
         speculative_config=None,
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
         ),
@@ -3886,6 +3890,8 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
     ]
     config = SimpleNamespace(
         speculative_config=None,
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
         ),

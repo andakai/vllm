@@ -270,6 +270,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.restore_kv_caches()
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        self._kv_cache_manager = kv_cache_manager
         for connector in self._connectors:
             connector.bind_kv_cache_manager(kv_cache_manager)
 
@@ -495,7 +496,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
-            c.on_new_request(request)
+            c.handle_new_request(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

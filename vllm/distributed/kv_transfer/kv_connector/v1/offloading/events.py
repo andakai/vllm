@@ -25,6 +25,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    get_block_stored_event_tokens,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (
@@ -97,6 +98,7 @@ class _OffloadEventMetadata:
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
     active_residencies: set[tuple[Medium, str | None]]
+    lookahead_token_ids: list[list[int]] | None = None
 
 
 class OffloadingEventsTracker:
@@ -112,8 +114,10 @@ class OffloadingEventsTracker:
         self,
         config: OffloadingKVEventsConfig,
         group_specs: dict[int, OffloadingEventGroupSpec] | None = None,
+        num_hash_lookahead_tokens: int = 0,
     ):
         self.config = config
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Static classification survives resets and never asserts prefix residency.
         self._group_specs = group_specs or {}
         self.self_describing_enabled = (
@@ -235,10 +239,18 @@ class OffloadingEventsTracker:
 
         lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
         lora_name = req.lora_request.name if req.lora_request is not None else None
+        token_ids, dependencies = get_block_stored_event_tokens(
+            req.all_token_ids,
+            chunk_start,
+            boundary_tokens,
+            tokens_per_hash,
+            self.num_hash_lookahead_tokens,
+        )
         meta = _OffloadEventMetadata(
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
-            token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
+            token_ids=tuple(token_ids),
+            lookahead_token_ids=dependencies,
             block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
@@ -328,7 +340,13 @@ class OffloadingEventsTracker:
         tok_start = chunk_idx * group_config.tokens_per_chunk
         tok_end = tok_start + group_config.tokens_per_chunk
         assert tok_end <= len(req.all_token_ids)
-        token_ids = tuple(req.all_token_ids[tok_start:tok_end])
+        token_ids, dependencies = get_block_stored_event_tokens(
+            req.all_token_ids,
+            tok_start,
+            tok_end,
+            group_config.tokens_per_block,
+            self.num_hash_lookahead_tokens,
+        )
 
         lora_id: int | None = None
         lora_name: str | None = None
@@ -339,7 +357,8 @@ class OffloadingEventsTracker:
         return _OffloadEventMetadata(
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
-            token_ids=token_ids,
+            token_ids=tuple(token_ids),
+            lookahead_token_ids=dependencies,
             block_size=group_config.tokens_per_block,
             lora_id=lora_id,
             lora_name=lora_name,
@@ -415,6 +434,7 @@ class OffloadingEventsTracker:
                     else None
                 ),
                 token_ids=list(meta.token_ids),
+                lookahead_token_ids=meta.lookahead_token_ids,
                 block_size=meta.block_size,
                 lora_id=meta.lora_id,
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],

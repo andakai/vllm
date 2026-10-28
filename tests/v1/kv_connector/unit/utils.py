@@ -358,6 +358,7 @@ class TestExampleConnector(ExampleConnector):
             "__dict__",
             "__getattribute__",
             "__init__",
+            "handle_new_request",
         ):  # avoid recursion
             return object.__getattribute__(self, name)
         if not hasattr(self._connector, name):

@@ -234,3 +234,58 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 **Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
 ![Example Time 6](../assets/design/prefix_caching/example-time-7.png)
+
+## Speculative decoding and KV connectors
+
+Some drafters depend on tokens after a block's last position. Core includes
+those dependencies in `Request.block_hashes` and delays publishing a hash
+until its dependency tokens are known. For block size 4 and lookahead 1,
+`ABCDE` can publish a key for `ABCD`; `ABCD` alone cannot. The stored KV
+payload still spans four positions, not five.
+
+`Request.block_hashes` is the shared identity and availability contract. Its
+length bounds the prefix for which keys exist; a connector must also restrict
+stores to finalized KV and retain its existing per-group alignment, checkpoint,
+and asynchronous-transfer checks. A known hash does **not** establish that KV
+has finished computing. No separate cache policy object is passed between core,
+connectors, or workers.
+
+Core enables lookahead hashing independently of the connector type. There is
+no connector capability declaration or MultiConnector-wide fallback. A cache
+that consumes core hashes must treat them as opaque identities and honor their
+available range; it cannot assume that every computed block already has a key.
+OffloadingConnector, MooncakeStoreConnector, SimpleCPUOffloadConnector, and
+UMBPStoreConnector consume these hashes. UMBP retains its existing conservative
+external lookup proof and store rules, while bounding lookup by available hashes.
+
+NIXL and Mooncake P/D retain their existing P-side prompt truncation. The shared
+`handle_new_request` entry point invokes the connector's `on_new_request` hook.
+If the hook shortens the prompt with lookahead enabled, the entry point removes
+invalid hash suffixes using the core block pool's hash size and dependency width.
+It also clears the embedding digest cache for embedding-only inputs.
+MultiConnector uses this entry point for each child, so a later child observes
+the corrected hashes. Connectors need no lookahead-specific truncation logic.
+Retained hashes are not recomputed, initial hashing stays in the input processing
+thread, and the general hasher and legacy truncation behavior are unchanged.
+
+For every connector, core dependency-aware hashing is enabled automatically when
+the speculative configuration requires it, including when local prefix caching
+is disabled. `VllmConfig` selects the hashing mode and whether the legacy EAGLE
+trailing-block drop is still needed. The existing
+`disable_lookahead_block_hashes` speculative option retains the legacy mode.
+
+The final sampled token can make another cache key available after a step's
+transfer metadata was built. Mooncake Store uses its existing request-finished
+callback to queue any newly eligible save and pins its source blocks until all
+workers complete. Publication timing, retries, and transfer ownership remain
+with the storage backend. KV events describe successful stores, and include
+dependency tokens separately from payload tokens.
+
+Independently keyed external caches keep their existing key and hit semantics;
+they no longer disable lookahead for local prefix hits. For example, LMCache MP
+uses token ranges for its token-based storage protocol, independently of the
+number of core hashes. As with the legacy core drop, local protection does not
+validate external hits. Migrating an external cache's identity scheme requires
+its adapter to consume core keys or encode equivalent dependencies. Enabling
+core lookahead does not establish external EAGLE/MTP correctness for arbitrary
+third-party implementations, whose existing model restrictions still apply.

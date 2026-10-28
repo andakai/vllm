@@ -3391,6 +3391,7 @@ def test_eager_store_matches_gpu_cacheable_prefix(
     speculative_config.num_speculative_tokens = 3
     speculative_config.use_eagle.return_value = True
     speculative_config.use_eagle_block_drop.return_value = True
+    speculative_config.disable_lookahead_block_hashes = True
     speculative_config.use_multi_module_mtp.return_value = prefill_lookahead > 1
     vllm_config.speculative_config = speculative_config
     scheduler = SimpleCPUOffloadScheduler(

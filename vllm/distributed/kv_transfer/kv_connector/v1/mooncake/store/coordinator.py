@@ -92,6 +92,7 @@ class MooncakeStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
         # to divide groups that participate in prefix caching. Non-shareable
@@ -122,6 +123,7 @@ class MooncakeStoreCoordinator:
         # Core's decision: whether hits land on the hash unit, below the block.
         self.enable_partial_hash_hits = enable_partial_hash_hits
         self.use_eagle = use_eagle
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
@@ -143,7 +145,6 @@ class MooncakeStoreCoordinator:
         block.
         """
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        spec_config = vllm_config.speculative_config
         alignment = kv_cache_config.cache_hit_alignment_tokens
         return cls(
             [
@@ -157,7 +158,8 @@ class MooncakeStoreCoordinator:
             ],
             scheduler_block_size,
             hash_block_size,
-            use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            use_eagle=vllm_config.use_eagle_block_drop,
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             enable_partial_hash_hits=(
                 alignment is not None and alignment < scheduler_block_size
@@ -193,12 +195,14 @@ class MooncakeStoreCoordinator:
                 if group.spec == spec:
                     assert manager_cls is group.manager_cls
                     group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
+                    if self.use_eagle and g.is_eagle_group and not group.use_eagle:
                         attention_groups[idx] = group._replace(use_eagle=True)
                     break
             else:
                 attention_groups.append(
-                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(
+                        spec, [i], manager_cls, self.use_eagle and g.is_eagle_group
+                    )
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))

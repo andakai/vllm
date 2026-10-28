@@ -61,6 +61,7 @@ def _make_bare_scheduler(
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
     scheduler._finished_partial_tail_metas = {}
+    scheduler._finished_save_metas = {}
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
@@ -302,6 +303,8 @@ def _make_qsa_hybrid_cache_config():
 def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     vllm_config = SimpleNamespace(
         speculative_config=None,
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
         ),
@@ -795,6 +798,7 @@ def test_from_request_tracker_load_overrides_caller_skip_save():
     req_meta = ReqMeta.from_request_tracker(
         tracker,
         block_size=16,
+        hash_block_size=16,
         load_spec=load_spec,
         skip_save=False,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -820,6 +824,7 @@ def test_from_request_tracker_load_with_can_load_false_still_saves():
     req_meta = ReqMeta.from_request_tracker(
         tracker,
         block_size=16,
+        hash_block_size=16,
         load_spec=load_spec,
         skip_save=False,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -845,7 +850,11 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
         tracker.token_len = 8
         assert (
             ReqMeta.from_request_tracker(
-                tracker, 16, save_partial_tail=True, num_prompt_tokens=token_len
+                tracker,
+                16,
+                16,
+                save_partial_tail=True,
+                num_prompt_tokens=token_len,
             )
             is None
         )
@@ -854,6 +863,7 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
     req_meta = ReqMeta.from_request_tracker(
         tracker,
         block_size=16,
+        hash_block_size=16,
         load_spec=None,
         skip_save=False,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -871,6 +881,7 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
     assert (
         ReqMeta.from_request_tracker(
             tracker,
+            16,
             16,
             save_partial_tail=save_partial_tail,
             num_prompt_tokens=token_len,
