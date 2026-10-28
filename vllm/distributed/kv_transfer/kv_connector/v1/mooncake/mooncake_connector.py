@@ -736,12 +736,6 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
-    @classmethod
-    def supports_request_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        return True
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1043,7 +1037,15 @@ class MooncakeConnectorScheduler:
             # loads nothing on the decoder, which recomputes past its local hit.
             and not request.skip_reading_external_kv
         ):
-            request.truncate_prompt_tokens(request.num_prompt_tokens - 1)
+            if request.prompt_token_ids is not None:
+                request.prompt_token_ids.pop()
+            elif request.prompt_embeds is not None:
+                request.prompt_embeds = request.prompt_embeds[:-1]
+            else:
+                return
+
+            request._all_token_ids.pop()
+            request.num_prompt_tokens -= 1
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 

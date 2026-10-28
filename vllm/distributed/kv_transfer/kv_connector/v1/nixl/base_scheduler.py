@@ -428,7 +428,15 @@ class NixlBaseConnectorScheduler:
             # loads nothing on the decoder, which recomputes past its local hit.
             and not request.skip_reading_external_kv
         ):
-            request.truncate_prompt_tokens(request.num_prompt_tokens - backoff)
+            if request.prompt_token_ids is not None:
+                del request.prompt_token_ids[-backoff:]
+            elif request.prompt_embeds is not None:
+                request.prompt_embeds = request.prompt_embeds[:-backoff]
+            else:
+                return
+
+            del request._all_token_ids[-backoff:]
+            request.num_prompt_tokens -= backoff
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 

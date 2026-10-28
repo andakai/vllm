@@ -956,7 +956,7 @@ def get_request_block_hasher(
     num_hash_lookahead_tokens: int = 0,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
-    of a request, discarding hashes beyond a shortened prompt first.
+    of a request.
 
     Hashes are computed at ``hash_block_size`` granularity and chained over the
     full prefix, so each hash uniquely fingerprints the prefix ending at its
@@ -971,11 +971,8 @@ def get_request_block_hasher(
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
-        num_tokens = request.num_tokens - num_hash_lookahead_tokens
-        # P/D can shorten an uncomputed prompt. Keep only hashes whose entire
-        # dependency window still exists; the retained prefix is unchanged.
-        del request.block_hashes[max(0, num_tokens) // hash_block_size :]
         start_token_idx = len(request.block_hashes) * hash_block_size
+        num_tokens = request.num_tokens - num_hash_lookahead_tokens
 
         if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.

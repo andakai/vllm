@@ -250,28 +250,29 @@ and asynchronous-transfer checks. A known hash does **not** establish that KV
 has finished computing. No separate cache policy object is passed between core,
 connectors, or workers.
 
-A connector declares `supports_request_block_hashes` when its cross-request
-cache uses core hashes as opaque identities and honors their available range.
-It must not assume that every computed block already has a key, or independently
-recreate a key from only the block's tokens. OffloadingConnector,
-MooncakeStoreConnector, and SimpleCPUOffloadConnector use this contract.
-MultiConnector enables it only when every child supports it.
+Core enables lookahead hashing independently of the connector type. There is
+no connector capability declaration or MultiConnector-wide fallback. A cache
+that consumes core hashes must treat them as opaque identities and honor their
+available range; it cannot assume that every computed block already has a key.
+OffloadingConnector, MooncakeStoreConnector, SimpleCPUOffloadConnector, and
+UMBPStoreConnector consume these hashes. UMBP retains its existing conservative
+external lookup proof and store rules, while bounding lookup by available hashes.
 
-NIXL and Mooncake P/D transfer request-local KV rather than matching an external
-prefix by content. They also accept core hashing, and use
-`Request.truncate_prompt_tokens` when shortening a P-side prompt. This operation
-preserves hashes whose entire dependency window remains inside the shortened
-prompt. The existing core hasher discards only the invalid suffix, and embedding
-hashes crossing the new end are invalidated. The retained prompt is not rehashed;
-the connector only decides how many prompt tokens to hand off.
+NIXL and Mooncake P/D retain their existing P-side prompt truncation. The shared
+`handle_new_request` entry point invokes the connector's `on_new_request` hook.
+If the hook shortens the prompt with lookahead enabled, the entry point removes
+invalid hash suffixes using the core block pool's hash size and dependency width.
+It also clears the embedding digest cache for embedding-only inputs.
+MultiConnector uses this entry point for each child, so a later child observes
+the corrected hashes. Connectors need no lookahead-specific truncation logic.
+Retained hashes are not recomputed, initial hashing stays in the input processing
+thread, and the general hasher and legacy truncation behavior are unchanged.
 
-For these connectors, dependency-aware hashing is enabled automatically when
+For every connector, core dependency-aware hashing is enabled automatically when
 the speculative configuration requires it, including when local prefix caching
 is disabled. `VllmConfig` selects the hashing mode and whether the legacy EAGLE
 trailing-block drop is still needed. The existing
 `disable_lookahead_block_hashes` speculative option retains the legacy mode.
-Connectors that have not declared the contract also keep legacy hashing; this
-does not establish that their external hits implement the legacy block drop.
 
 The final sampled token can make another cache key available after a step's
 transfer metadata was built. Mooncake Store uses its existing request-finished
@@ -280,9 +281,11 @@ workers complete. Publication timing, retries, and transfer ownership remain
 with the storage backend. KV events describe successful stores, and include
 dependency tokens separately from payload tokens.
 
-For an independently keyed external cache, preserving its previous behavior is
-not the same as migrating its external hits to lookahead hashes. The legacy
-core drop protects local prefix hits; it does not automatically validate the
-external hits reported by that connector. Such a connector needs a one-time
-adapter change to consume canonical keys and their available range before it
-can opt in. The storage backend need not interpret the dependency tokens.
+Independently keyed external caches keep their existing key and hit semantics;
+they no longer disable lookahead for local prefix hits. For example, LMCache MP
+uses token ranges for its token-based storage protocol, independently of the
+number of core hashes. As with the legacy core drop, local protection does not
+validate external hits. Migrating an external cache's identity scheme requires
+its adapter to consume core keys or encode equivalent dependencies. Enabling
+core lookahead does not establish external EAGLE/MTP correctness for arbitrary
+third-party implementations, whose existing model restrictions still apply.

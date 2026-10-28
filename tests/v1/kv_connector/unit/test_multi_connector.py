@@ -1017,6 +1017,7 @@ def test_multi_connector_overrides_all_base_methods():
     # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
     INHERITED_OK = {
         "role",
+        "handle_new_request",
         "has_connector_metadata",
         "get_kv_connector_kv_cache_events",
     }

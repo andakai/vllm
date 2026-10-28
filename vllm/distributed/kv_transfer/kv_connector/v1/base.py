@@ -194,20 +194,6 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
-    @classmethod
-    def supports_request_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        """Whether the connector accepts core-owned cache identities and bounds.
-
-        Cross-request caches must use ``request.block_hashes`` as opaque keys
-        and honor their available range, even when fewer hashes than computed
-        blocks exist. Request-local transfers may opt in when they preserve
-        Request's hash state on mutation. Independently keyed caches default
-        to False and retain legacy hashing.
-        """
-        return False
-
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
@@ -624,11 +610,30 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def handle_new_request(self, request: "Request") -> None:
+        """Invoke the admission hook and maintain hashes after prompt truncation."""
+        num_tokens = request.num_tokens
+        self.on_new_request(request)
+        if request.num_tokens >= num_tokens:
+            return
+
+        assert self._kv_cache_manager is not None
+        block_pool = self._kv_cache_manager.block_pool
+        if block_pool.num_hash_lookahead_tokens:
+            num_valid_hashes = (
+                max(0, request.num_tokens - block_pool.num_hash_lookahead_tokens)
+                // block_pool.hash_block_size
+            )
+            del request.block_hashes[num_valid_hashes:]
+            if request.prompt_token_ids is None:
+                request._prompt_embeds_per_block_hashes.clear()
+
     def on_new_request(self, request: "Request") -> None:
-        """Called by the scheduler when a new request is added.
+        """Called through handle_new_request when a new request is added.
 
         Connectors can override this to inspect the request and perform
-        bookkeeping. The default implementation is a no-op.
+        bookkeeping. Prompt tail truncation is reconciled by the caller.
+        The default implementation is a no-op.
         """
         return
 
@@ -650,7 +655,7 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assume responsibility for freeing the blocks
+        The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
