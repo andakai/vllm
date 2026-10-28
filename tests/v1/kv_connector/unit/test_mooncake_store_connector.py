@@ -1295,7 +1295,6 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
                     head_size=1,
                     dtype=torch.float32,
                 ),
-                is_eagle_group=True,
             ),
             KVCacheGroupSpec(
                 ["mamba"],
