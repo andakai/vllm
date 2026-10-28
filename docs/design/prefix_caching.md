@@ -234,3 +234,46 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 **Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
 ![Example Time 6](../assets/design/prefix_caching/example-time-7.png)
+
+## Speculative decoding and KV connectors
+
+Some drafters depend on tokens after a block's last position. Core includes
+those dependencies in `Request.block_hashes` and delays publishing a hash
+until its dependency tokens are known. For block size 4 and lookahead 1,
+`ABCDE` can publish a key for `ABCD`; `ABCD` alone cannot. The stored KV
+payload still spans four positions, not five.
+
+`BlockHashPolicy` provides the shared hash coverage, reuse bounds, and event
+token payloads used by GPU prefix caching and canonical-key external caches.
+Its `cacheable_tokens` method intersects a supplied finalized prefix with
+available hashes. It does **not** prove that KV has finished computing or that
+a Mamba checkpoint exists. Callers retain their per-group materialization,
+alignment, and asynchronous-transfer checks.
+
+A connector declares `supports_request_block_hashes` when its cross-request
+cache uses core hashes as opaque identities and honors their available range.
+It must not assume that every computed block already has a key, or independently
+recreate a key from only the block's tokens. OffloadingConnector,
+MooncakeStoreConnector, and SimpleCPUOffloadConnector use this contract.
+MultiConnector enables it only when every child supports it.
+
+NIXL and Mooncake P/D transfer request-local KV rather than matching an external
+prefix by content. They also accept core hashing, and use
+`Request.truncate_prompt_tokens` when shortening a P-side prompt. This operation
+rebuilds the hashes and invalidates cached embedding hashes before scheduling;
+the connector only decides how many prompt tokens to hand off.
+
+For these connectors, dependency-aware hashing is enabled automatically when
+the speculative configuration requires it, including when local prefix caching
+is disabled. `VllmConfig` selects the hashing mode and whether the legacy EAGLE
+trailing-block drop is still needed. The existing
+`disable_lookahead_block_hashes` speculative option retains the legacy mode.
+Connectors that have not declared the contract also keep legacy hashing; this
+does not establish that their external hits implement the legacy block drop.
+
+The final sampled token can make another cache key available after a step's
+transfer metadata was built. Mooncake Store uses its existing request-finished
+callback to queue any newly eligible save and pins its source blocks until all
+workers complete. Publication timing, retries, and transfer ownership remain
+with the storage backend. KV events describe successful stores, and include
+dependency tokens separately from payload tokens.
