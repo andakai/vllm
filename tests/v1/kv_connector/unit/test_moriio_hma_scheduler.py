@@ -54,6 +54,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
 
     def __init__(self, **attrs):
         self.mode = MoRIIOMode.READ
+        self.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._num_ssm_scratch_blocks = 0
@@ -155,6 +156,7 @@ def _gate_vllm_config(
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         num_lookahead_tokens=num_lookahead_tokens,
+        num_hash_lookahead_tokens=0,
         num_speculative_tokens=num_speculative_tokens,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,

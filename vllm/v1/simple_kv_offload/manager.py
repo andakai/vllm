@@ -411,7 +411,10 @@ class SimpleCPUOffloadScheduler:
             return 0, False
         # Must recompute at least the last token, matching the logic in
         # kv_cache_manager.get_computed_blocks().
-        max_hit_len = request.num_tokens - 1 - num_computed_tokens
+        max_hit_len = min(
+            request.num_tokens - 1 - num_computed_tokens,
+            len(remaining_hashes) * self.hash_block_size,
+        )
         if max_hit_len <= 0:
             return 0, False
         cpu_hit_blocks, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
