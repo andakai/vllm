@@ -99,6 +99,34 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
+## Lookahead hashes with speculative decoding
+
+EAGLE, EAGLE3, and MTP draft KV can depend on tokens after a block. By default,
+when prefix caching or KV transfer is enabled, vLLM includes those dependencies
+in `Request.block_hashes`, regardless of the selected connector (including
+`MultiConnector`). A hash is available only after the entire dependency window
+exists. For hash block size `B`, request length `N`, and lookahead length `L`,
+there are `max(0, N - L) // B` available hashes. The lookahead length follows the
+model's draft dependency, not the number of allocated speculative slots.
+
+Connectors using these hashes inherit the new identity without an opt-in method.
+Their lookups and stores must stay within the available hash range. NIXL
+(including Pull and Push) and Mooncake P/D prune invalid hash suffixes after
+shortening a prompt; MoRIIO does the same when lookahead is active. Existing
+model and transfer restrictions still apply, including MoRIIO's hybrid
+speculative-decoding restrictions.
+
+Connectors that derive external keys independently, such as LMCache and FlexKV,
+retain their external key semantics. Their local prefix-cache lookups use core
+lookahead hashes, but enabling this default does not add lookahead protection to
+independent external keys. Existing connector-specific external-hit safeguards
+remain in place.
+
+Set `disable_lookahead_block_hashes: true` in `--speculative-config` to use legacy
+hashes and the existing trailing-block drop. Engines sharing vLLM block hashes
+must use matching lookahead settings. Consumers of `BlockStored` events must
+account for `lookahead_token_ids` when reconstructing those hashes.
+
 ## Data Structure
 
 The prefix caching in vLLM v1 is implemented in the KV cache manager. The basic building block is the “Block” data class (simplified):

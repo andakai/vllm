@@ -682,11 +682,12 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.use_eagle_block_drop()
             or speculative_config.disable_lookahead_block_hashes
-            or not self.cache_config.enable_prefix_caching
         ):
             return 0
-        # KV connectors, including HiSparse's, keep the legacy hashes.
-        if self.kv_transfer_config is not None:
+        if (
+            not self.cache_config.enable_prefix_caching
+            and self.kv_transfer_config is None
+        ):
             return 0
         # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens

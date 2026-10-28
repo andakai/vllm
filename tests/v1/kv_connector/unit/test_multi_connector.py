@@ -12,7 +12,7 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, SpeculativeConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -367,8 +367,8 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # Initial events bind the cache manager, query completion counts, and exchange
-    # handshake metadata before the request is enqueued.
+    # The cache manager is bound, completion counts queried, and handshake
+    # metadata exchanged before the request is enqueued.
     assert storage1_scheduler_events[:7] == [
         "bind_kv_cache_manager",
         "get_finished_count",
@@ -378,8 +378,7 @@ def test_multi_example_connector_consistency():
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization. Layer hooks run before the
-    # deferred load starts after the forward pass.
+    # Layer hooks run before the deferred load starts after the forward pass.
     expected_worker_prefix = [
         "get_mem_pool_context",
         "register_kv_caches",
@@ -1042,6 +1041,81 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    (
+        "child_connectors",
+        "num_lookahead",
+        "prefix_caching",
+        "disabled",
+        "expected",
+    ),
+    [
+        ([], 1, True, False, True),
+        (["ExampleConnector", "ExampleConnector"], 1, True, False, True),
+        (["ExampleConnector"], 1, True, False, True),
+        (["ExampleConnector", "ExampleConnector"], 1, False, False, True),
+        (["ExampleConnector", "ExampleConnector"], 2, True, False, True),
+        (["ExampleConnector", "ExampleConnector"], 1, True, True, False),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+def test_multi_connector_children_use_configured_lookahead_hashes(
+    child_connectors: list[str],
+    num_lookahead: int,
+    prefix_caching: bool,
+    disabled: bool,
+    expected: bool,
+    nested: bool,
+    role: KVConnectorRole,
+):
+    children: list[dict[str, Any]] = [
+        {"kv_connector": name, "kv_role": "kv_both"} for name in child_connectors
+    ]
+    if nested:
+        children = [
+            {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {"connectors": children},
+            }
+        ]
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": children},
+        kv_role="kv_both",
+        disable_hybrid_kv_cache_manager=True,
+        hf_overrides={"num_nextn_predict_layers": num_lookahead},
+    )
+    # Construct the config without downloading a separate draft model.
+    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
+    spec.method = "mtp"
+    spec.draft_model_config = vllm_config.model_config
+    spec.disable_lookahead_block_hashes = disabled
+    vllm_config.speculative_config = spec
+    vllm_config.cache_config.enable_prefix_caching = prefix_caching
+
+    assert vllm_config.num_hash_lookahead_tokens == (num_lookahead if expected else 0)
+
+    connector = KVConnectorFactory.create_connector(
+        vllm_config,
+        role,
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    assert isinstance(connector, MultiConnector)
+    expected_tokens = num_lookahead if expected else 0
+    assert connector._vllm_config.num_hash_lookahead_tokens == expected_tokens
+    for child in connector.sub_connectors:
+        assert child._vllm_config.num_hash_lookahead_tokens == expected_tokens
+        if isinstance(child, MultiConnector):
+            assert all(
+                leaf._vllm_config.num_hash_lookahead_tokens == expected_tokens
+                for leaf in child.sub_connectors
+            )
 
 
 def test_multi_connector_worker_metadata(mc):

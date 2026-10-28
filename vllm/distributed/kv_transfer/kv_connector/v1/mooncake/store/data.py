@@ -765,6 +765,7 @@ class ReqMeta:
     token_ids: list[int] | None = None
     # Absolute request offset represented by token_ids[0].
     token_ids_start: int = 0
+    num_hash_lookahead_tokens: int = 0
     num_prompt_tokens: int | None = None
     # Total prefill tokens, including generated tokens replayed after preemption.
     prefill_end_tokens: int | None = None
@@ -789,6 +790,7 @@ class ReqMeta:
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
+        hash_block_size: int,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
@@ -805,6 +807,10 @@ class ReqMeta:
         token_ids_start = tracker.num_saved_tokens
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
+        num_tokens_to_save = min(
+            num_tokens_to_save,
+            len(block_hashes) * hash_block_size // block_size * block_size,
+        )
 
         publish_tail = (
             save_partial_tail

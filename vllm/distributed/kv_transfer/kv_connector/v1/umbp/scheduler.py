@@ -406,7 +406,9 @@ class UMBPStoreConnectorScheduler:
             return 0, False
         # vLLM must execute at least the final prompt token. Returning a hit
         # for the entire prompt leaves the scheduler with no new token to run.
-        max_external_token = request.num_tokens - 1
+        max_external_token = min(
+            request.num_tokens - 1, len(hashes) * self.hash_block_size
+        )
         if max_external_token <= num_computed_tokens:
             self._load_specs.pop(request.request_id, None)
             return 0, False
@@ -523,7 +525,8 @@ class UMBPStoreConnectorScheduler:
         keys: list[str] = []
         lookup_limit = request.num_tokens - 1
         if self.use_eagle and self._lookup_coordinator is not None:
-            lookup_limit = min(request.num_tokens, len(hashes) * self.hash_block_size)
+            lookup_limit = request.num_tokens
+        lookup_limit = min(lookup_limit, len(hashes) * self.hash_block_size)
         for group_id, unit in self._lookup_units.items():
             group_objects = []
             for token_end in range(local_tokens + unit, lookup_limit + 1, unit):
@@ -863,6 +866,9 @@ class UMBPStoreConnectorScheduler:
                             else None
                         ),
                         block_size=self.group_block_sizes[group_id],
+                        lookahead_token_ids=self._event_lookahead_tokens(
+                            request, boundary_tokens
+                        ),
                     )
                 )
             logger.debug(
@@ -979,6 +985,13 @@ class UMBPStoreConnectorScheduler:
         block_hashes: list[bytes] = []
         parent_block_hashes: list[bytes | None] = []
         token_ids_by_block: list[tuple[int, ...]] = []
+        lookahead_token_ids_by_block: list[tuple[int, ...] | None] | None = (
+            []
+            if self.enable_kv_cache_events
+            and self._gpu_block_pool is not None
+            and self._gpu_block_pool.num_hash_lookahead_tokens
+            else None
+        )
         block_sizes: list[int] = []
         block_groups = (
             block_ids_override
@@ -1040,6 +1053,10 @@ class UMBPStoreConnectorScheduler:
                     if self.enable_kv_cache_events
                     else ()
                 )
+                if lookahead_token_ids_by_block is not None:
+                    lookahead_token_ids_by_block.append(
+                        self._event_lookahead_tokens(request, token_end)
+                    )
                 block_sizes.append(group_block_size)
         return BlockStoreBatch(
             keys,
@@ -1050,7 +1067,20 @@ class UMBPStoreConnectorScheduler:
             token_ids_by_block,
             block_sizes,
             request_id,
+            lookahead_token_ids_by_block,
         )
+
+    def _event_lookahead_tokens(
+        self, request: Request, token_end: int
+    ) -> tuple[int, ...] | None:
+        pool = self._gpu_block_pool
+        if (
+            not self.enable_kv_cache_events
+            or pool is None
+            or not pool.num_hash_lookahead_tokens
+        ):
+            return None
+        return tuple(pool._lookahead_token_ids(request, token_end))
 
     def _restored_store_blocks(
         self,
@@ -1233,6 +1263,7 @@ class UMBPStoreConnectorScheduler:
                     key=self.codec.key(request.block_hashes[hash_index], group_id),
                     block_hash=request.block_hashes[hash_index],
                     block_size=group_block_size,
+                    lookahead_token_ids=self._event_lookahead_tokens(request, boundary),
                 )
             )
         # A Mamba page is a state snapshot, not a token-addressable byte array.
@@ -1372,6 +1403,11 @@ class UMBPStoreConnectorScheduler:
                                 else None
                             ),
                             token_ids=list(plan.token_ids),
+                            lookahead_token_ids=(
+                                [list(plan.lookahead_token_ids)]
+                                if plan.lookahead_token_ids is not None
+                                else None
+                            ),
                             block_size=plan.block_size,
                             lora_id=None,
                             medium=plan.medium,

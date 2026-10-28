@@ -21,6 +21,7 @@ from tests.v1.core.utils import (
 )
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -1134,7 +1135,7 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
-        pytest.param({"kv_connector": True}, 0, id="kv-connector"),
+        pytest.param({"kv_connector": True}, 1, id="kv-connector"),
     ],
 )
 def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
@@ -1155,7 +1156,11 @@ def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
             num_prefill_lookahead_tokens=overrides.get(
                 "num_prefill_lookahead_tokens", 1
             ),
-            kv_transfer_config=object() if overrides.get("kv_connector") else None,
+            kv_transfer_config=(
+                KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both")
+                if overrides.get("kv_connector")
+                else None
+            ),
         ),
     )
 

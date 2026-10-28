@@ -636,7 +636,7 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
