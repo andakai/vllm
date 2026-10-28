@@ -41,7 +41,7 @@ class _PendingPublication:
     num_computed_tokens: int
     num_pages: int
     retention_interval: int | None
-    replay_boundaries: Sequence[int]
+    replay_boundary: int
     detached_blocks: list[KVCacheBlock] | None = None
     num_cached_blocks: int = 0
 
@@ -492,7 +492,7 @@ class HiSparseCoordinator:
         num_computed_tokens: int,
         retention_interval: int | None,
         *,
-        replay_boundaries: Sequence[int],
+        replay_boundary: int,
     ) -> None:
         """Publish host-source hashes of the pages that are already durable."""
         manager = self.host_manager
@@ -504,7 +504,7 @@ class HiSparseCoordinator:
             num_computed_tokens=num_computed_tokens,
             num_pages=num_computed_tokens // manager.block_size,
             retention_interval=retention_interval,
-            replay_boundaries=replay_boundaries,
+            replay_boundary=replay_boundary,
         )
         self._publish_host_blocks_if_ready(request_id)
 
@@ -530,7 +530,7 @@ class HiSparseCoordinator:
             publication.request,
             num_tokens,
             retention_interval=publication.retention_interval,
-            replay_boundaries=publication.replay_boundaries,
+            replay_boundary=publication.replay_boundary,
         )
         self._record_copies(request_id, num_tokens)
         if state.ready_prefix_pages >= publication.num_pages:
