@@ -1049,21 +1049,19 @@ Options:
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("num_lookahead", "prefix_caching", "disabled", "expected", "nested", "role"),
+    ("num_lookahead", "prefix_caching", "expected", "nested", "role"),
     [
-        (1, True, False, 1, False, "SCHEDULER"),
-        (1, False, False, 1, False, "SCHEDULER"),
-        (2, True, False, 2, False, "SCHEDULER"),
-        (1, True, True, 0, False, "SCHEDULER"),
-        (1, True, False, 1, False, "WORKER"),
-        (1, True, False, 1, True, "SCHEDULER"),
-        (1, True, False, 1, True, "WORKER"),
+        (1, True, 1, False, "SCHEDULER"),
+        (1, False, 1, False, "SCHEDULER"),
+        (2, True, 2, False, "SCHEDULER"),
+        (1, True, 1, False, "WORKER"),
+        (1, True, 1, True, "SCHEDULER"),
+        (1, True, 1, True, "WORKER"),
     ],
 )
 def test_multi_connector_children_use_configured_lookahead_hashes(
     num_lookahead: int,
     prefix_caching: bool,
-    disabled: bool,
     expected: int,
     nested: bool,
     role: str,
@@ -1086,10 +1084,11 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
         disable_hybrid_kv_cache_manager=True,
     )
     vllm_config.cache_config.enable_prefix_caching = prefix_caching
-    set_mtp_config(vllm_config, num_lookahead, disable_lookahead_block_hashes=disabled)
+    set_mtp_config(vllm_config, num_lookahead)
 
     assert vllm_config.num_hash_lookahead_tokens == expected
 
+    assert vllm_config.num_hash_lookahead_tokens == num_lookahead
     connector = KVConnectorFactory.create_connector(
         vllm_config,
         KVConnectorRole[role],
