@@ -102,7 +102,6 @@ def _make_builder(
     mamba_block_size: int = BLOCK_SIZE,
     prefix_match_unit: int | None = None,
     use_eagle: bool = False,
-    disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
 ) -> AttentionMetadataBuilder:
@@ -117,9 +116,6 @@ def _make_builder(
         )
         if use_eagle:
             vllm_config.speculative_config.method = "eagle3"
-            vllm_config.speculative_config.disable_eagle_block_drop = (
-                disable_eagle_block_drop
-            )
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -213,7 +209,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         speculative_config=SimpleNamespace(
             num_speculative_tokens=2,
             parallel_drafting=False,
-            use_eagle_block_drop=Mock(return_value=False),
         ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.NONE,
@@ -366,25 +361,22 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 @pytest.mark.parametrize(
     (
         "seq_len",
-        "disable_eagle_block_drop",
         "num_hash_lookahead_tokens",
         "prefix_match_unit",
         "expected_offset",
     ),
     [
-        (100, False, 0, 16, 80),
-        (100, True, 0, 16, 96),
-        (100, False, 1, 16, 96),
-        (100, False, 0, 8, None),
-        (96, False, 0, 16, 80),
-        (96, True, 0, 16, 80),
+        (100, 4, 16, 96),
+        (100, 5, 16, 80),
+        (100, 1, 16, 96),
+        (100, 1, 8, None),
+        (96, 1, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
-    disable_eagle_block_drop: bool,
     num_hash_lookahead_tokens: int,
     prefix_match_unit: int,
     expected_offset: int | None,
@@ -413,7 +405,6 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         mamba_block_size=64,
         prefix_match_unit=prefix_match_unit,
         use_eagle=True,
-        disable_eagle_block_drop=disable_eagle_block_drop,
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)

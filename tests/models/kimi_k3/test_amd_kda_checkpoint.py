@@ -57,7 +57,7 @@ class _StubSpeculativeConfig:
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
 
-    def use_eagle_block_drop(self) -> bool:
+    def requires_lookahead_kv_hashes(self) -> bool:
         return False
 
 
