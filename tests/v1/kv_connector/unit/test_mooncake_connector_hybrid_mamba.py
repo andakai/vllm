@@ -177,7 +177,7 @@ def test_lookahead_hashes_follow_truncated_prefill(
     config = create_vllm_config(
         kv_connector=connector_name,
         kv_role="kv_producer",
-        hf_overrides={"num_nextn_predict_layers": num_lookahead},
+        hf_overrides={"n_predict": num_lookahead},
     )
     if num_lookahead:
         spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)

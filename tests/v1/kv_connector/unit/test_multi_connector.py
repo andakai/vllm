@@ -1121,7 +1121,7 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
         kv_connector_extra_config={"connectors": children},
         kv_role="kv_both",
         disable_hybrid_kv_cache_manager=True,
-        hf_overrides={"num_nextn_predict_layers": num_lookahead},
+        hf_overrides={"n_predict": num_lookahead},
     )
     # Construct the config without downloading a separate draft model.
     spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)

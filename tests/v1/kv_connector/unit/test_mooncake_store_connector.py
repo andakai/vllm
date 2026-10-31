@@ -1411,7 +1411,7 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
         kv_connector="MultiConnector",
         kv_role="kv_both",
         disable_hybrid_kv_cache_manager=True,
-        hf_overrides={"num_nextn_predict_layers": num_lookahead},
+        hf_overrides={"n_predict": num_lookahead},
         kv_connector_extra_config={
             "connectors": [
                 {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"},
