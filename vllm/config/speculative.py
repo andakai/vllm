@@ -2070,8 +2070,8 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
-    def use_hash_lookahead(self) -> bool:
-        """Whether the draft method requires lookahead-aware KV hashes."""
+    def requires_lookahead_kv_hashes(self) -> bool:
+        """Whether reusable draft KV depends on tokens beyond its boundary."""
         # Gemma4 MTP is Q-only and reuses the target's KV without writing it.
         return self.method in ("eagle", "eagle3", "mtp") and not self.use_gemma4_mtp()
 

@@ -678,7 +678,7 @@ class VllmConfig:
     def num_hash_lookahead_tokens(self) -> int:
         """Finalized tokens beyond each block needed to identify its draft KV."""
         spec = self.speculative_config
-        if spec is None or not spec.use_hash_lookahead():
+        if spec is None or not spec.requires_lookahead_kv_hashes():
             return 0
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is not None:

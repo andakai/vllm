@@ -3735,7 +3735,7 @@ def test_draft_kv_lookahead_dependency(
     speculative_config.method = method
 
     assert speculative_config.use_eagle()
-    assert speculative_config.use_hash_lookahead() is needs_lookahead
+    assert speculative_config.requires_lookahead_kv_hashes() is needs_lookahead
 
 
 @pytest.fixture
