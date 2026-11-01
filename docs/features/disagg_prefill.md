@@ -51,11 +51,23 @@ Now supports 9 types of connectors:
   so its host allocation includes draft KV layers. The initial protocol supports
   one KV cache group with pipeline parallel size 1; other layouts require further
   adapter support. Lookahead selects the token-major `LBNHC` layout required by
-  FlexKV transfers. This does not remove the legacy EAGLE block-drop path.
+  FlexKV transfers. Use an attention backend that supports this layout, such as
+  FlashAttention; a backend restricted to head-major layouts cannot use this
+  transfer implementation. This does not remove the legacy EAGLE block-drop path.
 
   ```bash
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
+
+- **LMCacheConnectorV1 lookahead** requires an external adapter advertising
+  `LOOKAHEAD_HASHES_VERSION = 1`. Older packages and `use_native=True` retain
+  legacy hashing. The initial in-process implementation supports one
+  full-attention KV group, without pipeline/context parallelism, layerwise
+  transfer, CacheBlend, or LMCache P/D transfer. Unsupported combinations are
+  rejected when lookahead is enabled; disable lookahead to use a legacy path.
+  Hash-only suffix tokens do not allocate KV slots. Cache entries are isolated
+  by model/draft configuration, layout, LoRA, and cache salt. This capability is
+  separate from the external `LMCacheMPConnector` implementation.
 
 ## Reusing prefill token ids on decode
 

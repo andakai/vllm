@@ -1,17 +1,62 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from collections.abc import Iterator
+from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
+
+from .utils import create_vllm_config, set_mtp_config
+
+
+@pytest.mark.parametrize("version", [None, 1, 2])
+@pytest.mark.parametrize("use_native", [False, True])
+def test_lookahead_requires_versioned_external_adapter(
+    monkeypatch, version, use_native
+):
+    calls = []
+
+    class ExternalAdapter:
+        LOOKAHEAD_HASHES_VERSION: int
+
+        def __init__(self, config, role, parent, kv_cache_config=None):
+            calls.append(kv_cache_config)
+
+    if version is not None:
+        ExternalAdapter.LOOKAHEAD_HASHES_VERSION = version
+    module = ModuleType("lmcache.integration.vllm.vllm_v1_adapter")
+    module.LMCacheConnectorV1Impl = ExternalAdapter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    config = create_vllm_config(block_size=16, max_num_batched_tokens=512)
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1",
+        kv_role="kv_both",
+        kv_connector_extra_config={"use_native": use_native},
+    )
+    set_mtp_config(config, 4)
+    assert config.num_hash_lookahead_tokens == (
+        1 if version == 1 and not use_native else 0
+    )
+    if not use_native:
+        cache_config = KVCacheConfig(
+            num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[]
+        )
+        LMCacheConnectorV1(config, KVConnectorRole.SCHEDULER, cache_config)
+        assert calls == [cache_config if version == 1 else None]
 
 
 @pytest.fixture
@@ -93,11 +138,15 @@ class TestGetKVConnectorKVCacheEvents:
 
         assert result is None
 
-    def test_converts_single_event(self, mock_connector, mock_lmcache_engine_event):
+    @pytest.mark.parametrize("lookahead", [None, [[5], [6]]])
+    def test_converts_single_event(
+        self, mock_connector, mock_lmcache_engine_event, lookahead
+    ):
         """Test conversion of a single event from lmcache engine format."""
         mock_connector._lmcache_engine.get_kv_events.return_value = [
             mock_lmcache_engine_event
         ]
+        mock_lmcache_engine_event.lookahead_token_ids = lookahead
 
         result = mock_connector.get_kv_connector_kv_cache_events()
 
@@ -115,6 +164,7 @@ class TestGetKVConnectorKVCacheEvents:
         assert events[0].block_size == 16
         assert events[0].medium == "GPU"
         assert events[0].lora_name is None
+        assert events[0].lookahead_token_ids == lookahead
 
     def test_converts_multiple_events(self, mock_connector):
         """Test conversion of multiple events from lmcache engine format."""
