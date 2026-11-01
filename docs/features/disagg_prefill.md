@@ -45,6 +45,13 @@ Now supports 9 types of connectors:
 
 - **FlexKVConnectorV1**: refer to [examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py](../../examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py) for the example usage of FlexKVConnectorV1. FlexKV is a distributed KV Store and multi-level cache management system for ultra-large-scale LLM inference.
 
+  Lookahead block hashing requires a FlexKV adapter advertising
+  `LOOKAHEAD_HASHES_VERSION = 1` and a matching FlexKV server. Older adapters
+  retain legacy hashing. The adapter receives the resolved KV cache configuration
+  so its host allocation includes draft KV layers. The initial protocol supports
+  one KV cache group with pipeline parallel size 1; other layouts require further
+  adapter support. This does not remove the legacy EAGLE block-drop path.
+
   ```bash
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
