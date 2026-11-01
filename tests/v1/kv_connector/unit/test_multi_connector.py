@@ -40,7 +40,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 
@@ -457,8 +461,10 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
@@ -498,8 +504,10 @@ def test_multi_example_connector_consistency():
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
 
@@ -1127,13 +1135,32 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
     )
     vllm_config.cache_config.enable_prefix_caching = prefix_caching
     set_mtp_config(vllm_config, num_lookahead, disable_lookahead_block_hashes=disabled)
+    if num_lookahead > 1:
+        # The normalized draft config declares actual MTP modules via n_predict.
+        vllm_config.speculative_config.draft_model_config.hf_config.n_predict = (
+            num_lookahead
+        )
+        vllm_config.num_hash_lookahead_tokens = (
+            vllm_config._resolve_num_hash_lookahead_tokens()
+        )
 
     assert vllm_config.num_hash_lookahead_tokens == expected
 
     connector = KVConnectorFactory.create_connector(
         vllm_config,
         KVConnectorRole[role],
-        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        KVCacheConfig(
+            num_blocks=0,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+                    ),
+                )
+            ],
+        ),
     )
 
     assert isinstance(connector, MultiConnector)

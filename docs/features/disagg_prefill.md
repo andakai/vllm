@@ -79,6 +79,24 @@ Now supports 9 types of connectors:
   until that prefix is computed. It does not save the terminal partial block.
   Disabling lookahead retains the legacy example file format.
 
+## Lookahead hashing compatibility
+
+Connectors support core lookahead block hashing by default. MoRIIO and UMBP
+remain on legacy hashes pending their adaptation. LMCache and FlexKV wrappers
+require compatible external implementations; older packages and the builtin
+LMCache paths keep legacy hashing. A `MultiConnector` enables lookahead only
+when all children support it and propagates the parent's resolved hash policy.
+
+External connectors loaded with `kv_connector_module_path` inherit the new
+default. Their authors must ensure independent cache keys include the required
+following tokens and that transfers contain only computed KV, with draft layers
+ready before publication. Connectors that still assume one hash per complete
+block, truncate tokens without updating hashes, or use legacy external keys
+must override `supports_lookahead_block_hashes` to return `False` until adapted.
+This default is a compatibility contract, not certification of arbitrary
+third-party code. The legacy EAGLE block-drop path and explicit
+`disable_lookahead_block_hashes` setting remain available.
+
 ## Reusing prefill token ids on decode
 
 !!! note

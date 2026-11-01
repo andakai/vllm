@@ -198,8 +198,12 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector supports core lookahead hashing."""
-        return False
+        """Whether the connector supports core lookahead hashing.
+
+        Legacy connectors must opt out until their cache keys and KV ranges
+        account for the following token window.
+        """
+        return True
 
     @property
     def requires_kv_delivery(self) -> bool:

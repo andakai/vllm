@@ -1194,7 +1194,9 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
-        pytest.param({"kv_connector": True}, 0, id="kv-connector"),
+        pytest.param({"kv_connector": "ExampleConnector"}, 1, id="kv-connector"),
+        pytest.param({"kv_connector": "MoRIIOConnector"}, 0, id="mori-legacy"),
+        pytest.param({"kv_connector": "UMBPStoreConnector"}, 0, id="umbp-legacy"),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
 )
@@ -1219,7 +1221,7 @@ def test_num_hash_lookahead_tokens(
         if num_lookahead > 1 or method == "dspark":
             speculative_config.draft_model_config = ModelConfig(
                 model="facebook/opt-125m",
-                hf_overrides={"num_nextn_predict_layers": num_lookahead},
+                hf_overrides={"n_predict": num_lookahead},
             )
             speculative_config.draft_parallel_config = ParallelConfig()
     vllm_config = VllmConfig(
@@ -1228,7 +1230,7 @@ def test_num_hash_lookahead_tokens(
         ),
         speculative_config=speculative_config,
         kv_transfer_config=(
-            KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both")
+            KVTransferConfig(kv_connector=overrides["kv_connector"], kv_role="kv_both")
             if overrides.get("kv_connector")
             else None
         ),

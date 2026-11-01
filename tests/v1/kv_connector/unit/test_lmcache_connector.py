@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.util
+import pickle
 import sys
 from collections.abc import Iterator
 from types import ModuleType
@@ -10,6 +12,7 @@ import pytest
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
@@ -21,6 +24,47 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_vllm_config, set_mtp_config
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("external_support", [None, False, True])
+@pytest.mark.parametrize("force_builtin", [False, True])
+def test_mp_legacy_packages_do_not_inherit_new_default(
+    monkeypatch, external_support, force_builtin
+):
+    pytest.importorskip("lmcache")
+    external_name = "lmcache.integration.vllm.lmcache_mp_connector"
+    external = ModuleType(external_name)
+    attributes: dict[str, object] = {"__module__": external_name}
+    if external_support is not None:
+        attributes["supports_lookahead_block_hashes"] = classmethod(
+            lambda cls, config: external_support
+        )
+    external.LMCacheMPConnector = type(  # type: ignore[attr-defined]
+        "LMCacheMPConnector", (KVConnectorBase_V1,), attributes
+    )
+    monkeypatch.setitem(sys.modules, external_name, external)
+    if force_builtin:
+        monkeypatch.setenv("LMCACHE_USE_UPSTREAM_MP", "1")
+    else:
+        monkeypatch.delenv("LMCACHE_USE_UPSTREAM_MP", raising=False)
+
+    original = importlib.util.find_spec(
+        "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector"
+    )
+    assert original is not None and original.origin is not None
+    spec = importlib.util.spec_from_file_location("_test_mp_resolver", original.origin)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    connector_cls = module.LMCacheMPConnector
+    config = KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    assert KVConnectorBase_V1.supports_lookahead_block_hashes(config)
+    assert connector_cls.supports_lookahead_block_hashes(config) is (
+        external_support is True and not force_builtin
+    )
+    assert pickle.loads(pickle.dumps(connector_cls)) is connector_cls
 
 
 @pytest.mark.parametrize("version", [None, 1, 2])

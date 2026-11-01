@@ -63,6 +63,8 @@ CHECK_IMPORTS = {
             "vllm/model_executor/model_loader/weight_cache/protocol.py",
             "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
+            # Verify the module-level LMCache compatibility class survives spawn.
+            "tests/v1/kv_connector/unit/test_lmcache_connector.py",
             "vllm/utils/hashing.py",
             "tests/multimodal/media/test_base.py",
             "tests/tokenizers_/test_hf.py",

@@ -337,6 +337,10 @@ steps:
     - "!vllm/distributed/kv_transfer/"
     - vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/
     - vllm/distributed/kv_transfer/kv_connector/v1/example_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/lmcache_mp_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/umbp/connector.py
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
