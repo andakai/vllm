@@ -30,7 +30,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -63,6 +63,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import BlockHashListWithBlockSize
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.utils import create_metric_per_engine
@@ -466,6 +467,12 @@ class AsyncOperationManager:
 class HF3FSKVConnector(KVConnectorBase_V1):
     """HF3FS KV Connector implementation."""
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -482,6 +489,28 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._use_mla = vllm_config.model_config.use_mla
         self._model_config = vllm_config.model_config
+        self._num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
+        self._hash_block_size = kv_cache_config.hash_block_size
+        if self._num_hash_lookahead_tokens and role == KVConnectorRole.SCHEDULER:
+            assert self._hash_block_size is not None
+            assert self._block_size % self._hash_block_size == 0
+            spec = vllm_config.speculative_config
+            assert spec is not None
+            self._hash_namespace = hashlib.sha256(
+                repr(
+                    (
+                        "hf3fs-lookahead-v1",
+                        self._model_config.compute_hash(),
+                        spec.method,
+                        spec.compute_hash(),
+                        vllm_config.parallel_config.compute_hash(),
+                        vllm_config.cache_config.cache_dtype,
+                        self._block_size,
+                        self._hash_block_size,
+                        self._num_hash_lookahead_tokens,
+                    )
+                ).encode()
+            ).hexdigest()
 
         logger.info("Using MLA: %s", self._use_mla)
 
@@ -622,7 +651,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 continue
 
             skip_blocks = request.save_block_op.skip_leading_blocks
-            block_hashes = self._generate_block_hashes(request.token_ids, skip_blocks)
+            block_hashes = (
+                request.block_hashes[skip_blocks:]
+                if request.block_hashes is not None
+                else self._generate_block_hashes(request.token_ids, skip_blocks)
+            )
             block_ids = request.block_ids[skip_blocks : skip_blocks + len(block_hashes)]
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
@@ -644,8 +677,15 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             load_op = request.load_block_op
             block_ids = request.block_ids[: load_op.num_blocks_to_load]
-            block_hashes = self._generate_block_hashes(
-                request.token_ids, load_op.num_computed_blocks, len(block_ids)
+            block_hashes = (
+                request.block_hashes[
+                    load_op.num_computed_blocks : load_op.num_computed_blocks
+                    + len(block_ids)
+                ]
+                if request.block_hashes is not None
+                else self._generate_block_hashes(
+                    request.token_ids, load_op.num_computed_blocks, len(block_ids)
+                )
             )
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
@@ -705,8 +745,12 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
                 return 0, False
 
-            token_ids_to_check = request.prompt_token_ids[:num_tokens_to_check]
-            block_hashes = self._generate_block_hashes(token_ids_to_check, 0)
+            block_hashes = self._get_request_block_hashes(request)
+            if block_hashes is None:
+                token_ids_to_check = request.prompt_token_ids[:num_tokens_to_check]
+                block_hashes = self._generate_block_hashes(token_ids_to_check, 0)
+            else:
+                block_hashes = block_hashes[: num_tokens_to_check // self._block_size]
 
             # Check existence
             exists_results = self._metadata_client.batch_key_exists(block_hashes)
@@ -812,7 +856,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             state.allocated_block_ids = state.load_op.need_fetch_block_ids.copy()
 
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state, self._block_size, state.load_op, num_cached_blocks
+                state,
+                self._block_size,
+                state.load_op,
+                num_cached_blocks,
+                self._get_request_block_hashes(state.request),
             )
 
             if request_metadata:
@@ -843,7 +891,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
 
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state, self._block_size, None, num_cached_blocks
+                state,
+                self._block_size,
+                None,
+                num_cached_blocks,
+                self._get_request_block_hashes(state.request),
             )
 
             if request_metadata:
@@ -871,7 +923,9 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             # Create save metadata
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state, self._block_size, None
+                state,
+                self._block_size,
+                block_hashes=self._get_request_block_hashes(state.request),
             )
 
             if request_metadata:
@@ -942,6 +996,20 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         state.token_ids = request.prompt_token_ids[:num_tokens_to_compute].copy()
         state.allocated_block_ids = unfolded_block_ids
         state.num_saved_blocks = 0
+
+    def _get_request_block_hashes(self, request: Request | None) -> list[str] | None:
+        """Snapshot core lookahead identities at the storage block boundaries."""
+        if not self._num_hash_lookahead_tokens:
+            return None
+        assert request is not None
+        assert self._hash_block_size is not None
+        hashes = BlockHashListWithBlockSize(
+            request.block_hashes, self._hash_block_size, self._block_size
+        )
+        return [
+            hashlib.sha256(self._hash_namespace.encode() + block_hash).hexdigest()
+            for block_hash in hashes
+        ]
 
     def _generate_block_hashes(
         self,

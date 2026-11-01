@@ -5,19 +5,175 @@
 - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
 """
 
+import atexit
 import os
+import signal
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
+    Hf3fsMetadataClient,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
+    HF3FSRequestMetadata,
+    LoadBlockInfo,
+    RequestSchedulingState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
 )
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
+from vllm.v1.request import Request
+
+
+@pytest.fixture
+def hf3fs_scheduler_factory(monkeypatch):
+    stored_keys: set[str] = set()
+    queried_keys: list[str] = []
+
+    def lookup(self, keys):
+        queried_keys[:] = keys
+        return [key in stored_keys for key in keys]
+
+    # Only the external metadata service is replaced; configs and requests are real.
+    monkeypatch.setattr(Hf3fsMetadataClient, "initialize", lambda *args, **kwargs: None)
+    monkeypatch.setattr(Hf3fsMetadataClient, "batch_key_exists", lookup)
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT)
+    handlers = {sig: signal.getsignal(sig) for sig in signals}
+    connectors = []
+    init_none_hash(sha256)
+
+    def create(hash_block_size, lookahead):
+        config = create_vllm_config(kv_connector="HF3FSKVConnector")
+        if lookahead:
+            set_mtp_config(config, lookahead)
+        cache = KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+                    ),
+                )
+            ],
+            hash_block_size=hash_block_size,
+        )
+        connector = HF3FSKVConnector(config, KVConnectorRole.SCHEDULER, cache)
+        connectors.append(connector)
+        return connector, stored_keys, queried_keys
+
+    yield create
+    for connector in connectors:
+        connector.close()
+        atexit.unregister(connector.close)
+    for sig, handler in handlers.items():
+        signal.signal(sig, handler)
+
+
+def _hashed_request(tokens, hash_block_size, lookahead):
+    return Request(
+        request_id="test",
+        prompt_token_ids=tokens,
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(hash_block_size, sha256, lookahead),
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("hash_block_size", [4, 16])
+@pytest.mark.parametrize("lookahead", [0, 1, 5])
+def test_lookup_separates_lookahead_dependencies(
+    hf3fs_scheduler_factory, hash_block_size, lookahead
+):
+    """Changing a dependency token must miss the affected block, not its prefix."""
+    connector, stored, queried = hf3fs_scheduler_factory(hash_block_size, lookahead)
+    tokens = list(range(32 + max(1, lookahead)))
+    request = _hashed_request(tokens, hash_block_size, lookahead)
+    assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert len(queried) == 2
+    stored.update(queried)
+    assert connector.get_num_new_matched_tokens(request, 0) == (32, True)
+
+    changed = _hashed_request(tokens[:-1] + [999], hash_block_size, lookahead)
+    expected = 16 if lookahead else 32
+    assert connector.get_num_new_matched_tokens(changed, 0) == (expected, True)
+
+
+@pytest.mark.cpu_test
+def test_save_metadata_waits_for_hash_and_snapshots_the_block_prefix(
+    hf3fs_scheduler_factory,
+):
+    """A known key does not authorize saving uncomputed KV or mutable metadata."""
+    connector, _, _ = hf3fs_scheduler_factory(4, 1)
+    request = _hashed_request(list(range(32)), 4, 1)
+    state = RequestSchedulingState(
+        request_id=request.request_id,
+        request=request,
+        token_ids=request.all_token_ids.copy(),
+        allocated_block_ids=[1, 2],
+    )
+    first = HF3FSRequestMetadata.from_scheduling_state(
+        state, 16, block_hashes=connector._get_request_block_hashes(request)
+    )
+    assert first is not None and first.save_block_op is not None
+    assert len(first.block_hashes) == state.num_saved_blocks == 1
+
+    request.append_output_token_ids([32])
+    keys = connector._get_request_block_hashes(request)
+    assert keys is not None and len(keys) == 2
+    second = HF3FSRequestMetadata.from_scheduling_state(state, 16, block_hashes=keys)
+    assert second is not None and second.save_block_op is not None
+    assert second.save_block_op.skip_leading_blocks == 1
+    assert second.block_hashes == keys
+
+    # The third key is known from the prompt, but only two blocks will run.
+    future = _hashed_request(list(range(49)), 4, 1)
+    assert (
+        HF3FSRequestMetadata.from_scheduling_state(
+            state, 16, block_hashes=connector._get_request_block_hashes(future)
+        )
+        is None
+    )
+    state.token_ids.append(999)
+    state.allocated_block_ids.append(3)
+    assert first.token_ids == list(range(32))
+    assert first.block_ids == [1, 2]
+    assert len(first.block_hashes) == 1
+
+
+@pytest.mark.cpu_test
+def test_load_metadata_does_not_schedule_a_save():
+    """Async load-only metadata cannot save KV before it has arrived."""
+    state = RequestSchedulingState(
+        request_id="load", token_ids=list(range(32)), allocated_block_ids=[1, 2]
+    )
+    meta = HF3FSRequestMetadata.from_scheduling_state(
+        state,
+        16,
+        LoadBlockInfo(0, 2, [1, 2]),
+        skip_leading_blocks=2,
+        block_hashes=["first", "second"],
+    )
+    assert meta is not None and meta.load_block_op is not None
+    assert meta.save_block_op is None
+
 
 # ---------------------------------------------------------------------------
 # Helpers
