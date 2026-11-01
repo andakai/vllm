@@ -50,7 +50,8 @@ Now supports 9 types of connectors:
   retain legacy hashing. The adapter receives the resolved KV cache configuration
   so its host allocation includes draft KV layers. The initial protocol supports
   one KV cache group with pipeline parallel size 1; other layouts require further
-  adapter support. This does not remove the legacy EAGLE block-drop path.
+  adapter support. Lookahead selects the token-major `LBNHC` layout required by
+  FlexKV transfers. This does not remove the legacy EAGLE block-drop path.
 
   ```bash
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'

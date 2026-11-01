@@ -64,6 +64,13 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             return False
         return getattr(FlexKVConnectorV1Impl, "LOOKAHEAD_HASHES_VERSION", 0) == 1
 
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
+        # FlexKV transfers derive token-major strides from the cache shape.
+        if vllm_config.num_hash_lookahead_tokens:
+            return "LBNHC"
+        return None
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
