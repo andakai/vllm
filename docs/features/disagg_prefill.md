@@ -71,6 +71,14 @@ Now supports 9 types of connectors:
   by model/draft configuration, layout, LoRA, and cache salt. This capability is
   separate from the external `LMCacheMPConnector` implementation.
 
+- **ExampleConnector lookahead** uses core block hashes, including the following
+  token window and request identity, in a separate model/draft namespace. It
+  publishes target and draft KV together after the forward pass, using an atomic
+  file replacement. This debug path supports one full-attention KV group on a
+  single GPU and caches only a complete prompt prefix; chunked prefill waits
+  until that prefix is computed. It does not save the terminal partial block.
+  Disabling lookahead retains the legacy example file format.
+
 ## Reusing prefill token ids on decode
 
 !!! note

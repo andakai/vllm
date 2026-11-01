@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import safetensors
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -38,6 +39,7 @@ class ReqMeta:
     # Is store or load
     is_store: bool
     mm_hashes: list[str]
+    cache_key: str | None = None
 
     @staticmethod
     def make_meta(
@@ -88,6 +90,12 @@ class ExampleConnector(KVConnectorBase_V1):
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -100,12 +108,55 @@ class ExampleConnector(KVConnectorBase_V1):
             kv_cache_config=kv_cache_config,
         )
         self._block_size = vllm_config.cache_config.block_size
+        self._lookahead = vllm_config.num_hash_lookahead_tokens
+        self._kv_caches: dict[str, torch.Tensor] = {}
+        self._pending_stores: dict[str, tuple[Request, list[int]]] = {}
         self._requests_need_load: dict[str, Request] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
         logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
+        if self._lookahead:
+            from vllm.v1.kv_cache_interface import FullAttentionSpec, iter_layer_specs
+
+            groups = kv_cache_config.kv_cache_groups
+            parallel = vllm_config.parallel_config
+            if (
+                len(groups) != 1
+                or parallel.tensor_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or not all(
+                    isinstance(spec, FullAttentionSpec)
+                    and spec.sliding_window is None
+                    and spec.attention_chunk_size is None
+                    and not spec.non_causal
+                    for spec in iter_layer_specs(groups[0].kv_cache_spec)
+                )
+            ):
+                raise ValueError(
+                    "ExampleConnector lookahead requires one full-attention "
+                    "KV group on a single GPU"
+                )
+            self._block_size = groups[0].kv_cache_spec.block_size
+            assert vllm_config.model_config is not None
+            assert vllm_config.speculative_config is not None
+            namespace = (
+                "example-lookahead-v1",
+                vllm_config.model_config.compute_hash(),
+                vllm_config.speculative_config.compute_hash(),
+                vllm_config.cache_config.compute_hash(),
+                repr(groups[0].kv_cache_spec),
+                self._lookahead,
+            )
+            self._cache_namespace = safe_hash(
+                repr(namespace).encode(), usedforsecurity=False
+            ).hexdigest()
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        self._kv_caches = kv_caches
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
@@ -120,6 +171,26 @@ class ExampleConnector(KVConnectorBase_V1):
             the same.
 
         """
+        if self._lookahead:
+            metadata = self._get_connector_metadata()
+            assert isinstance(metadata, ExampleConnectorMetadata)
+            for request in metadata.requests:
+                if request.is_store:
+                    continue
+                assert request.cache_key is not None
+                tensors = safetensors.torch.load_file(
+                    os.path.join(self._storage_path, request.cache_key + ".safetensors")
+                )
+                if tensors.keys() != self._kv_caches.keys():
+                    raise ValueError("Cached KV layers do not match registered layers")
+                for name, layer in self._kv_caches.items():
+                    with gpu_sync_allowed():
+                        slots = request.slot_mapping.to(layer.device)
+                        values = tensors[name].to(layer.device)
+                    layer[slots // self._block_size, :, slots % self._block_size] = (
+                        values
+                    )
+            return
 
         def inject_kv_into_layer(
             dst_kv_cache_layer: torch.Tensor,
@@ -156,7 +227,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
 
         # Get the metadata
-        metadata: KVConnectorMetadata = self._get_connector_metadata()
+        metadata = self._get_connector_metadata()
         assert isinstance(metadata, ExampleConnectorMetadata)
 
         attn_metadata = forward_context.attn_metadata
@@ -227,6 +298,9 @@ class ExampleConnector(KVConnectorBase_V1):
             **kwargs: additional arguments for the save operation.
 
         """
+        if self._lookahead:
+            # wait_for_save runs after the draft forward, including deferred finalize.
+            return
 
         def extract_kv_from_layer(
             layer: torch.Tensor,
@@ -259,6 +333,35 @@ class ExampleConnector(KVConnectorBase_V1):
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
+        if self._lookahead and self.has_connector_metadata():
+            metadata = self._get_connector_metadata()
+            assert isinstance(metadata, ExampleConnectorMetadata)
+            for request in metadata.requests:
+                if not request.is_store:
+                    continue
+                assert request.cache_key is not None
+                assert self._kv_caches
+                tensors = {}
+                for name, layer in self._kv_caches.items():
+                    with gpu_sync_allowed():
+                        slots = request.slot_mapping.to(layer.device)
+                        values = layer[
+                            slots // self._block_size, :, slots % self._block_size
+                        ]
+                        tensors[name] = values.detach().cpu().contiguous()
+                os.makedirs(self._storage_path, exist_ok=True)
+                # Publish all target and draft layers together, after copying finishes.
+                with tempfile.TemporaryDirectory(
+                    prefix=".store-", dir=self._storage_path
+                ) as tmp_dir:
+                    tmp_file = os.path.join(tmp_dir, "kv.safetensors")
+                    safetensors.torch.save_file(tensors, tmp_file)
+                    os.replace(
+                        tmp_file,
+                        os.path.join(
+                            self._storage_path, request.cache_key + ".safetensors"
+                        ),
+                    )
         return
 
     def get_num_new_matched_tokens(
@@ -279,6 +382,15 @@ class ExampleConnector(KVConnectorBase_V1):
             external KV cache beyond what is already computed.
 
         """
+        if self._lookahead:
+            entry = self._lookahead_cache_entry(request)
+            if entry is None:
+                return 0, False
+            key, num_tokens = entry
+            if os.path.isfile(os.path.join(self._storage_path, key + ".safetensors")):
+                return max(0, num_tokens - num_computed_tokens), False
+            return 0, False
+
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
         # Therefore, we use prompt_token_ids[:-1] to determine the folder name
@@ -308,6 +420,11 @@ class ExampleConnector(KVConnectorBase_V1):
         """
         if num_external_tokens > 0:
             self._requests_need_load[request.request_id] = request
+        elif self._lookahead:
+            self._pending_stores[request.request_id] = (
+                request,
+                blocks.get_block_ids()[0].copy(),
+            )
 
     def build_connector_meta(
         self,
@@ -322,6 +439,9 @@ class ExampleConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
 
         """
+        if self._lookahead:
+            return self._build_lookahead_meta(scheduler_output)
+
         meta = ExampleConnectorMetadata()
 
         total_need_load = 0
@@ -389,6 +509,78 @@ class ExampleConnector(KVConnectorBase_V1):
     # ==============================
     # Helper functions
     # ==============================
+
+    def _lookahead_cache_entry(self, request: "Request") -> tuple[str, int] | None:
+        if request.prompt_embeds is not None:
+            return None
+        hash_size = self._kv_cache_config.hash_block_size
+        assert hash_size is not None
+        num_tokens = min(
+            max(0, request.num_prompt_tokens - max(1, self._lookahead)),
+            len(request.block_hashes) * hash_size,
+        )
+        num_tokens = num_tokens // self._block_size * self._block_size
+        if not num_tokens:
+            return None
+        block_hash = request.block_hashes[num_tokens // hash_size - 1]
+        return f"{self._cache_namespace}-{block_hash.hex()}", num_tokens
+
+    def _build_lookahead_meta(
+        self, output: SchedulerOutput
+    ) -> ExampleConnectorMetadata:
+        meta = ExampleConnectorMetadata()
+        for req_id in output.finished_req_ids | (output.preempted_req_ids or set()):
+            self._pending_stores.pop(req_id, None)
+        cached = output.scheduled_cached_reqs
+        blocks_by_request = {
+            req.req_id: req.block_ids[0] for req in output.scheduled_new_reqs
+        }
+        for i, req_id in enumerate(cached.req_ids):
+            new_blocks = cached.new_block_ids[i]
+            if req_id in cached.resumed_req_ids:
+                assert new_blocks is not None
+                blocks_by_request[req_id] = new_blocks[0]
+            elif req_id in self._pending_stores and new_blocks is not None:
+                self._pending_stores[req_id][1].extend(new_blocks[0])
+
+        requests = [
+            (request, blocks_by_request[req_id], False)
+            for req_id, request in self._requests_need_load.items()
+        ]
+        self._requests_need_load.clear()
+        requests.extend(
+            (request, blocks, True)
+            for request, blocks in self._pending_stores.values()
+            if request.request_id in output.num_scheduled_tokens
+        )
+        for request, blocks, is_store in requests:
+            entry = self._lookahead_cache_entry(request)
+            if entry is None:
+                self._pending_stores.pop(request.request_id, None)
+                continue
+            key, num_tokens = entry
+            if is_store and (
+                request.num_computed_tokens
+                + output.num_scheduled_tokens[request.request_id]
+                < num_tokens
+            ):
+                continue
+            slots = (
+                torch.tensor(blocks)[:, None] * self._block_size
+                + torch.arange(self._block_size)
+            ).flatten()[:num_tokens]
+            assert len(slots) == num_tokens
+            meta.requests.append(
+                ReqMeta(
+                    torch.tensor(request.all_token_ids[:num_tokens]),
+                    slots,
+                    is_store,
+                    [],
+                    key,
+                )
+            )
+            self._pending_stores.pop(request.request_id, None)
+        return meta
 
     def _found_match_for_request(
         self,

@@ -3,14 +3,36 @@
 from typing import NamedTuple
 
 import pytest
+import torch
 from PIL import Image
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+)
+from vllm.forward_context import ForwardContext
 from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    get_request_block_hasher,
+    init_none_hash,
+)
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
+from vllm.v1.request import Request
+
+from .utils import create_vllm_config, set_mtp_config
 
 MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
 
@@ -20,6 +42,102 @@ TEXT_PROMPTS = [
     "What's in the image(s)? Around 30 words. What's special in 2nd image?",
     "The future of AI is",
 ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("hash_block_size", [8, 16])
+@pytest.mark.parametrize("lookahead", [1, 17])
+def test_lookahead_atomic_store_and_restore(tmp_path, hash_block_size, lookahead):
+    """Publish target/draft KV together, keyed by the complete lookahead window."""
+    config = create_vllm_config(
+        kv_connector="ExampleConnector",
+        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+    )
+    set_mtp_config(config, lookahead)
+    # Exercise the resolved H contract beyond today's one-token MTP window.
+    config.num_hash_lookahead_tokens = lookahead
+    cache = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target", "draft"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=4, dtype=torch.float32
+                ),
+            )
+        ],
+        hash_block_size=hash_block_size,
+    )
+    scheduler = ExampleConnector(config, KVConnectorRole.SCHEDULER, cache)
+    worker = ExampleConnector(config, KVConnectorRole.WORKER, cache)
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(hash_block_size, sha256, lookahead)
+
+    def request(tokens, name="test"):
+        return Request(
+            request_id=name,
+            prompt_token_ids=tokens,
+            sampling_params=SamplingParams(max_tokens=4),
+            pooling_params=None,
+            block_hasher=hasher,
+        )
+
+    def step(req, ids, scheduled):
+        output = SchedulerOutput.make_empty()
+        output.scheduled_new_reqs = [NewRequestData.from_request(req, (ids,))]
+        output.num_scheduled_tokens = {req.request_id: scheduled}
+        output.total_num_scheduled_tokens = scheduled
+        return output
+
+    tokens = list(range(32 + lookahead))
+    req = request(tokens)
+    blocks = KVCacheBlocks(([KVCacheBlock(1)],))
+    scheduler.update_state_after_alloc(req, blocks, 0)
+    assert scheduler.build_connector_meta(step(req, [1], 16)).requests == []
+    req.num_computed_tokens = 16
+    continuation = step(req, [], 16)
+    continuation.scheduled_new_reqs = []
+    continuation.scheduled_cached_reqs.req_ids = [req.request_id]
+    continuation.scheduled_cached_reqs.new_block_ids = [([2],)]
+    meta = scheduler.build_connector_meta(continuation)
+    assert len(meta.requests) == 1 and len(meta.requests[0].slot_mapping) == 32
+    assert scheduler.get_num_new_matched_tokens(req, 0) == (0, False)
+
+    layers = {
+        name: torch.arange(8 * 16 * 8, dtype=torch.float32).reshape(8, 1, 16, 8)
+        for name in ("target", "draft")
+    }
+    worker.register_kv_caches(layers)
+    worker.bind_connector_metadata(meta)
+    # Draft KV is finalized after metadata creation, before wait_for_save.
+    layers["draft"].add_(1000)
+    expected = {name: layer[1:3].clone() for name, layer in layers.items()}
+    worker.wait_for_save()
+    worker.clear_connector_metadata()
+    assert len(list(tmp_path.iterdir())) == 1
+    assert scheduler.get_num_new_matched_tokens(req, 0) == (32, False)
+    assert scheduler.get_num_new_matched_tokens(req, 16) == (16, False)
+    changed = tokens.copy()
+    changed[32] += 100
+    assert scheduler.get_num_new_matched_tokens(request(changed), 0) == (0, False)
+
+    hit = request(tokens, "hit")
+    load_blocks = KVCacheBlocks(([KVCacheBlock(i) for i in (4, 5, 6, 7)],))
+    scheduler.update_state_after_alloc(hit, load_blocks, 32)
+    load_meta = scheduler.build_connector_meta(step(hit, [4, 5, 6, 7], lookahead))
+    assert len(load_meta.requests) == 1 and not load_meta.requests[0].is_store
+    for layer in layers.values():
+        layer.zero_()
+    worker.bind_connector_metadata(load_meta)
+    worker.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata=None, slot_mapping={})
+    )
+    worker.clear_connector_metadata()
+    for name, layer in layers.items():
+        torch.testing.assert_close(layer[4:6], expected[name], rtol=0, atol=0)
+        assert torch.count_nonzero(layer[:4]) == 0
+        assert torch.count_nonzero(layer[6:]) == 0
 
 
 class InputCase(NamedTuple):
