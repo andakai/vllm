@@ -501,6 +501,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._model_config = vllm_config.model_config
         self._num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         self._hash_block_size = kv_cache_config.hash_block_size
+        if self._num_hash_lookahead_tokens:
+            self._block_size = kv_cache_config.kv_cache_groups[
+                0
+            ].kv_cache_spec.block_size
         if self._num_hash_lookahead_tokens and role == KVConnectorRole.SCHEDULER:
             assert self._hash_block_size is not None
             assert self._block_size % self._hash_block_size == 0

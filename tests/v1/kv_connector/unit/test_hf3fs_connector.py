@@ -62,7 +62,13 @@ def hf3fs_scheduler_factory(monkeypatch):
     connectors = []
     init_none_hash(sha256)
 
-    def create(hash_block_size, lookahead, role=KVConnectorRole.SCHEDULER, extra=None):
+    def create(
+        hash_block_size,
+        lookahead,
+        role=KVConnectorRole.SCHEDULER,
+        extra=None,
+        block_size=16,
+    ):
         config = create_vllm_config(kv_connector="HF3FSKVConnector")
         if lookahead:
             set_mtp_config(config, lookahead)
@@ -75,7 +81,10 @@ def hf3fs_scheduler_factory(monkeypatch):
                 KVCacheGroupSpec(
                     ["layer"],
                     FullAttentionSpec(
-                        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=8,
+                        dtype=torch.float16,
                     ),
                 )
             ],
@@ -248,21 +257,25 @@ def test_resume_replaces_old_blocks_and_uses_current_computed_boundary(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("hash_block_size", [4, 16])
-@pytest.mark.parametrize("lookahead", [0, 1, 5])
+@pytest.mark.parametrize(
+    "lookahead,block_size", [(0, 16), (1, 16), (5, 16), (1, 32), (5, 32)]
+)
 def test_lookup_separates_lookahead_dependencies(
-    hf3fs_scheduler_factory, hash_block_size, lookahead
+    hf3fs_scheduler_factory, hash_block_size, lookahead, block_size
 ):
     """Changing a dependency token must miss the affected block, not its prefix."""
-    connector, stored, queried = hf3fs_scheduler_factory(hash_block_size, lookahead)
-    tokens = list(range(32 + max(1, lookahead)))
+    connector, stored, queried = hf3fs_scheduler_factory(
+        hash_block_size, lookahead, block_size=block_size
+    )
+    tokens = list(range(2 * block_size + max(1, lookahead)))
     request = _hashed_request(tokens, hash_block_size, lookahead)
     assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
     assert len(queried) == 2
     stored.update(queried)
-    assert connector.get_num_new_matched_tokens(request, 0) == (32, True)
+    assert connector.get_num_new_matched_tokens(request, 0) == (2 * block_size, True)
 
     changed = _hashed_request(tokens[:-1] + [999], hash_block_size, lookahead)
-    expected = 16 if lookahead else 32
+    expected = block_size if lookahead else 2 * block_size
     assert connector.get_num_new_matched_tokens(changed, 0) == (expected, True)
 
 
