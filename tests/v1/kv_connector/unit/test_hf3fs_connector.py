@@ -8,6 +8,8 @@
 import atexit
 import os
 import signal
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -22,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
     Hf3fsMetadataClient,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
+    HF3FSConnectorMetadata,
     HF3FSRequestMetadata,
     LoadBlockInfo,
     RequestSchedulingState,
@@ -31,7 +34,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client 
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -57,10 +62,12 @@ def hf3fs_scheduler_factory(monkeypatch):
     connectors = []
     init_none_hash(sha256)
 
-    def create(hash_block_size, lookahead):
+    def create(hash_block_size, lookahead, role=KVConnectorRole.SCHEDULER, extra=None):
         config = create_vllm_config(kv_connector="HF3FSKVConnector")
         if lookahead:
             set_mtp_config(config, lookahead)
+        if extra:
+            config.kv_transfer_config.kv_connector_extra_config.update(extra)
         cache = KVCacheConfig(
             num_blocks=8,
             kv_cache_tensors=[],
@@ -74,7 +81,7 @@ def hf3fs_scheduler_factory(monkeypatch):
             ],
             hash_block_size=hash_block_size,
         )
-        connector = HF3FSKVConnector(config, KVConnectorRole.SCHEDULER, cache)
+        connector = HF3FSKVConnector(config, role, cache)
         connectors.append(connector)
         return connector, stored_keys, queried_keys
 
@@ -94,6 +101,149 @@ def _hashed_request(tokens, hash_block_size, lookahead):
         pooling_params=None,
         block_hasher=get_request_block_hasher(hash_block_size, sha256, lookahead),
     )
+
+
+@pytest.fixture
+def hf3fs_worker(hf3fs_scheduler_factory, monkeypatch, tmp_path, dist_init):
+    """Run real CUDA resources and I/O threads against the file-backed client."""
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs."
+        "hf3fs_connector.Hf3fsClient",
+        MockHf3fsClient,
+    )
+    worker, _, _ = hf3fs_scheduler_factory(
+        4,
+        1,
+        KVConnectorRole.WORKER,
+        dict(
+            hf3fs_storage_path=str(tmp_path),
+            hf3fs_file_size=1 << 20,
+            hf3fs_client_numjobs=1,
+            hf3fs_max_device_buffer_count=8,
+        ),
+    )
+    worker.register_kv_caches({"layer": torch.zeros(8, 1, 16, 8, device="cuda")})
+    return worker
+
+
+def test_failed_multibatch_load_keeps_finished_blocks_until_all_io_completes(
+    hf3fs_worker, monkeypatch
+):
+    """An aborted request keeps every destination until all load batches finish."""
+    entered = [Event(), Event()]
+    release = [Event(), Event()]
+
+    def locations(self, rank, keys):
+        index = int(keys[0])
+        entered[index].set()
+        assert release[index].wait(timeout=10)
+        return [None]
+
+    monkeypatch.setattr(Hf3fsMetadataClient, "get_key_locations", locations)
+    manager = hf3fs_worker._async_manager
+    first = manager.submit_load_operation("load", [1], ["0"])
+    last = manager.submit_load_operation("load", [2], ["1"])
+    try:
+        assert entered[0].wait(timeout=10)
+        assert hf3fs_worker.get_finished({"load"}) == (set(), set())
+        release[0].set()
+        assert entered[1].wait(timeout=10)
+        assert first.result(timeout=10) is False
+        assert hf3fs_worker.get_finished(set()) == (set(), set())
+        release[1].set()
+        assert last.result(timeout=10) is False
+        assert hf3fs_worker.get_finished(set()) == ({"load"}, {"load"})
+        assert hf3fs_worker.get_block_ids_with_load_errors() == {1, 2}
+        assert hf3fs_worker.get_block_ids_with_load_errors() == set()
+        assert hf3fs_worker.get_finished(set()) == (set(), set())
+    finally:
+        for event in release:
+            event.set()
+
+
+@pytest.mark.parametrize("operation", ["save", "load"])
+def test_preemption_waits_before_reusing_blocks(hf3fs_worker, monkeypatch, operation):
+    entered, release, started = Event(), Event(), Event()
+
+    def service(self, rank, keys):
+        entered.set()
+        assert release.wait(timeout=10)
+        return [("key", -1)] if operation == "save" else [None]
+
+    method = "allocate_pages_for_keys" if operation == "save" else "get_key_locations"
+    monkeypatch.setattr(Hf3fsMetadataClient, method, service)
+    manager = hf3fs_worker._async_manager
+    transfer = getattr(manager, f"submit_{operation}_operation")(
+        "preempted", [1], ["key"]
+    )
+    metadata = HF3FSConnectorMetadata()
+    metadata.preempted_req_ids = {"preempted"}
+
+    def preempt():
+        started.set()
+        hf3fs_worker.handle_preemptions(metadata)
+
+    assert entered.wait(timeout=10)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        finished = executor.submit(preempt)
+        try:
+            assert started.wait(timeout=10)
+            assert not finished.done()
+        finally:
+            release.set()
+        finished.result(timeout=10)
+    assert transfer.result(timeout=10) is False
+    assert hf3fs_worker.get_finished(set()) == (set(), set())
+
+
+@pytest.mark.cpu_test
+def test_resume_replaces_old_blocks_and_uses_current_computed_boundary(
+    hf3fs_scheduler_factory,
+):
+    """Recomputed KV after preemption must not be read from the old allocation."""
+    connector, _, _ = hf3fs_scheduler_factory(4, 1)
+    request = _hashed_request(list(range(49)), 4, 1)
+    connector.get_num_new_matched_tokens(request, 0)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([],)), 0)
+
+    def scheduled(new_reqs, cached_reqs, num_tokens):
+        return SchedulerOutput(
+            scheduled_new_reqs=new_reqs,
+            scheduled_cached_reqs=cached_reqs,
+            num_scheduled_tokens={request.request_id: num_tokens},
+            total_num_scheduled_tokens=num_tokens,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+    initial = scheduled(
+        [NewRequestData.from_request(request, ([1, 2],))],
+        CachedRequestData.make_empty(),
+        32,
+    )
+    assert connector.build_connector_meta(initial).requests[0].block_ids == [1, 2]
+    output = scheduled(
+        [],
+        CachedRequestData(
+            req_ids=[request.request_id],
+            resumed_req_ids={request.request_id},
+            num_computed_tokens=[0],
+            new_block_ids=[([6, 7],)],
+            new_token_ids=[],
+            all_token_ids={},
+            num_output_tokens=[0],
+        ),
+        16,
+    )
+    metadata = connector.build_connector_meta(output)
+    assert len(metadata.requests) == 1
+    saved = metadata.requests[0]
+    assert saved.block_ids == [6, 7]
+    assert saved.token_ids == list(range(16))
+    assert len(saved.block_hashes) == 1
+    assert saved.save_block_op.skip_leading_blocks == 0
 
 
 @pytest.mark.cpu_test
