@@ -25,8 +25,9 @@ from .utils import create_vllm_config, set_mtp_config
 
 @pytest.mark.parametrize("version", [None, 1, 2])
 @pytest.mark.parametrize("use_native", [False, True])
+@pytest.mark.parametrize("inprocess_module", [False, True])
 def test_lookahead_requires_versioned_external_adapter(
-    monkeypatch, version, use_native
+    monkeypatch, version, use_native, inprocess_module
 ):
     calls = []
 
@@ -38,9 +39,12 @@ def test_lookahead_requires_versioned_external_adapter(
 
     if version is not None:
         ExternalAdapter.LOOKAHEAD_HASHES_VERSION = version
-    module = ModuleType("lmcache.integration.vllm.vllm_v1_adapter")
+    new_path = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
+    old_path = "lmcache.integration.vllm.vllm_v1_adapter"
+    module = ModuleType(new_path if inprocess_module else old_path)
     module.LMCacheConnectorV1Impl = ExternalAdapter  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setitem(sys.modules, old_path if inprocess_module else new_path, None)
     config = create_vllm_config(block_size=16, max_num_batched_tokens=512)
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="LMCacheConnectorV1",

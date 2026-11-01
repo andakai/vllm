@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -30,6 +31,21 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _get_lmcache_adapter_class() -> type[Any]:
+    module_path = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
+    try:
+        return import_module(module_path).LMCacheConnectorV1Impl
+    except ModuleNotFoundError as error:
+        # Only fall back for packages predating the in-process module move.
+        if error.name is None or not (
+            module_path == error.name or module_path.startswith(error.name + ".")
+        ):
+            raise
+    return import_module(
+        "lmcache.integration.vllm.vllm_v1_adapter"
+    ).LMCacheConnectorV1Impl
 
 
 class LMCacheKVEvents(KVConnectorKVEvents):
@@ -74,10 +90,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         if kv_transfer_config.get_from_extra_config("use_native", False):
             return False
         try:
-            from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+            adapter_cls = _get_lmcache_adapter_class()
         except ImportError:
             return False
-        return getattr(LMCacheConnectorV1Impl, "LOOKAHEAD_HASHES_VERSION", 0) == 1
+        return getattr(adapter_cls, "LOOKAHEAD_HASHES_VERSION", 0) == 1
 
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
@@ -118,9 +134,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         else:
             logger.info("Initializing latest dev LMCache connector")
             # lazy import
-            from lmcache.integration.vllm.vllm_v1_adapter import (
-                LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
-            )
+            LMCacheConnectorLatestImpl = _get_lmcache_adapter_class()
 
             if getattr(LMCacheConnectorLatestImpl, "LOOKAHEAD_HASHES_VERSION", 0) == 1:
                 self._lmcache_engine = LMCacheConnectorLatestImpl(

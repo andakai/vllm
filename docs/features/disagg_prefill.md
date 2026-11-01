@@ -61,7 +61,9 @@ Now supports 9 types of connectors:
 
 - **LMCacheConnectorV1 lookahead** requires an external adapter advertising
   `LOOKAHEAD_HASHES_VERSION = 1`. Older packages and `use_native=True` retain
-  legacy hashing. The initial in-process implementation supports one
+  legacy hashing. The wrapper loads `lmcache.inprocess.integration.vllm` on
+  newer packages and the former `lmcache.integration.vllm` path on older ones.
+  The initial in-process implementation supports one
   full-attention KV group, without pipeline/context parallelism, layerwise
   transfer, CacheBlend, or LMCache P/D transfer. Unsupported combinations are
   rejected when lookahead is enabled; disable lookahead to use a legacy path.
