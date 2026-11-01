@@ -44,6 +44,7 @@ from vllm.v1.hisparse.types import (
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.config import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
@@ -222,6 +223,12 @@ class HiSparseConnectorScheduler:
 
 class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     """Join the scheduler coordinator to the worker's transfer engine."""
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return True
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str:
