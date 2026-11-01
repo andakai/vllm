@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from typing import NamedTuple
 
 import pytest
@@ -42,6 +43,74 @@ TEXT_PROMPTS = [
     "What's in the image(s)? Around 30 words. What's special in 2nd image?",
     "The future of AI is",
 ]
+
+
+def test_lookahead_eagle3_chunked_prefill(vllm_runner, tmp_path):
+    """Real target/draft KV survives external reload and rejects a changed suffix."""
+    with vllm_runner(
+        "Qwen/Qwen3-1.7B",
+        revision="70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+        dtype="bfloat16",
+        seed=42,
+        block_size=16,
+        max_model_len=2048,
+        max_num_seqs=8,
+        max_num_batched_tokens=64,
+        kv_cache_memory_bytes=1 << 30,
+        enable_prefix_caching=True,
+        enforce_eager=False,
+        disable_log_stats=False,
+        attention_config={"backend": "FLASH_ATTN"},
+        speculative_config={
+            "method": "eagle3",
+            "model": "AngelSlim/Qwen3-1.7B_eagle3",
+            "revision": "94441b48acc5804677ae12259617c83323b543a9",
+            "num_speculative_tokens": 4,
+        },
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+        ),
+    ) as runner:
+        llm = runner.get_llm()
+        assert llm.llm_engine.vllm_config.num_hash_lookahead_tokens == 1
+        tokenizer = llm.get_tokenizer()
+        tokens = tokenizer.encode(
+            "The library lends twelve books every Monday. " * 40,
+            add_special_tokens=False,
+        )[:136]
+        sampling = SamplingParams(temperature=0, seed=42, max_tokens=64, logprobs=5)
+
+        def counter(name):
+            return next(
+                metric.value for metric in llm.get_metrics() if metric.name == name
+            )
+
+        def generate(prompt):
+            # ExampleConnector finishes its synchronous save before request completion.
+            assert llm.reset_prefix_cache(reset_connector=False)
+            before = counter("vllm:external_prefix_cache_hits")
+            result = llm.generate(
+                [{"prompt_token_ids": prompt}], sampling, use_tqdm=False
+            )[0].outputs[0]
+            return result, counter("vllm:external_prefix_cache_hits") - before
+
+        cold, cold_hits = generate(tokens)
+        warm, warm_hits = generate(tokens)
+        assert cold_hits == 0
+        assert warm_hits == 128
+        assert counter("vllm:spec_decode_num_accepted_tokens") > 0
+        assert cold.logprobs is not None and warm.logprobs is not None
+        for token in (cold.token_ids[0], warm.token_ids[0]):
+            assert math.exp(cold.logprobs[0][token].logprob) == pytest.approx(
+                math.exp(warm.logprobs[0][token].logprob), abs=0.01, rel=0
+            )
+        changed = tokens.copy()
+        changed[128] = tokenizer.encode("elephant", add_special_tokens=False)[0]
+        assert changed[128] != tokens[128]
+        _, changed_hits = generate(changed)
+        assert changed_hits == 0
 
 
 @pytest.mark.cpu_test
