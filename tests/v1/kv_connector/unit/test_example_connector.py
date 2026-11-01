@@ -56,6 +56,7 @@ def test_lookahead_eagle3_chunked_prefill(vllm_runner, tmp_path):
         max_model_len=2048,
         max_num_seqs=8,
         max_num_batched_tokens=64,
+        enable_chunked_prefill=True,
         kv_cache_memory_bytes=1 << 30,
         enable_prefix_caching=True,
         enforce_eager=False,
