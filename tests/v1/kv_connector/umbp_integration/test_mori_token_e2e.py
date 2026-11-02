@@ -137,6 +137,8 @@ def test_mtp_restore_preserves_last_prefix_block(vllm_runner, socket_dir):
         revision=revision,
         dtype="bfloat16",
         kv_cache_dtype="bfloat16",
+        block_size=64,
+        enable_chunked_prefill=True,
         max_model_len=4096,
         max_num_seqs=8,
         max_num_batched_tokens=2048,
