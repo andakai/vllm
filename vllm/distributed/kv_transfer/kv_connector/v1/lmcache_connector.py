@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -29,6 +30,21 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _get_lmcache_adapter_class() -> type[Any]:
+    module_path = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
+    try:
+        return import_module(module_path).LMCacheConnectorV1Impl
+    except ModuleNotFoundError as error:
+        # Only fall back for packages predating the in-process module move.
+        if error.name is None or not (
+            module_path == error.name or module_path.startswith(error.name + ".")
+        ):
+            raise
+    return import_module(
+        "lmcache.integration.vllm.vllm_v1_adapter"
+    ).LMCacheConnectorV1Impl
 
 
 class LMCacheKVEvents(KVConnectorKVEvents):
@@ -98,12 +114,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             cls = _adapter.LMCacheConnectorV1Impl
         else:
             logger.info("Initializing latest dev LMCache connector")
-            # lazy import
-            from lmcache.integration.vllm.vllm_v1_adapter import (
-                LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
-            )
-
-            cls = LMCacheConnectorLatestImpl
+            cls = _get_lmcache_adapter_class()
 
         self._lmcache_engine = cls(vllm_config, role, self)
 
