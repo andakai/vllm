@@ -81,8 +81,10 @@ Now supports 9 types of connectors:
 
 ## Lookahead hashing compatibility
 
-Connectors support core lookahead block hashing by default. MoRIIO and UMBP
-remain on legacy hashes pending their adaptation. LMCache and FlexKV wrappers
+Connectors support core lookahead block hashing by default. MoRIIO updates
+hashes when truncating a hybrid producer's prompt. UMBP uses the core hash policy
+for external hits and stores completed KV once its lookahead hash is available.
+Existing model and transfer-mode restrictions still apply. LMCache and FlexKV wrappers
 require compatible external implementations; older packages and the builtin
 LMCache paths keep legacy hashing. A `MultiConnector` enables lookahead only
 when all children support it and propagates the parent's resolved hash policy.

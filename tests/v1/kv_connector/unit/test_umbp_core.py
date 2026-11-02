@@ -26,6 +26,9 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_request,
     make_scheduler_output,
 )
+from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
+from vllm import SamplingParams
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
@@ -60,8 +63,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
+    get_request_block_hasher,
+    init_none_hash,
+)
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -70,6 +81,8 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 mori_available = importlib.util.find_spec("mori") is not None
@@ -83,6 +96,127 @@ _LAYER1_SPEC = FullAttentionSpec(
     block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
 )
 _LAYER2_SPEC = replace(_LAYER1_SPEC, num_kv_heads=2)
+
+
+@pytest.mark.parametrize("scheduled_compute", [False, True])
+@pytest.mark.parametrize("preempted", [False, True])
+@pytest.mark.parametrize("save_decode_cache", [False, True])
+def test_lookahead_finish_saves_only_computed_kv(
+    scheduled_compute, preempted, save_decode_cache
+):
+    """The last sample makes a hash reusable; a pending load supplies no KV."""
+    config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"save_decode_cache": save_decode_cache},
+    )
+    set_mtp_config(config)
+    config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
+    kv_config = _kv_cache_config()
+    kv_config.hash_block_size = 16
+    scheduler = UMBPStoreConnectorScheduler(
+        config,
+        kv_config,
+        _SchedulerHandle({}),
+        BlockIdentityCodec(UMBPNamespace("lookahead")),
+    )
+    pool = BlockPool(8, True, 16, enable_kv_cache_events=False)
+    scheduler.bind_gpu_block_pool(pool)
+    blocks = pool.get_new_blocks(2)
+    block_ids = ([block.block_id for block in blocks],)
+    init_none_hash(sha256)
+    request = Request(
+        "r",
+        list(range(32)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256, 1),
+    )
+    scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), 0)
+    if scheduled_compute:
+        output = SchedulerOutput.make_empty()
+        output.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+        output.num_scheduled_tokens = {"r": 32}
+        output.total_num_scheduled_tokens = 32
+        first = scheduler.build_connector_meta(output)
+        assert [plan.block_id for plan in first.iter_store_plans()] == [
+            blocks[0].block_id
+        ]
+        assert list(first.iter_store_plans())[0].lookahead_token_ids == (16,)
+    if preempted:
+        output = SchedulerOutput.make_empty()
+        output.preempted_req_ids = {"r"}
+        scheduler.build_connector_meta(output)
+    request.num_computed_tokens = 32
+    request.append_output_token_ids(32)
+    assert len(request.block_hashes) == 2
+    scheduler.request_finished(request, block_ids)
+    output = SchedulerOutput.make_empty()
+    output.finished_req_ids = {"r"}
+    final = scheduler.build_connector_meta(output)
+    plans = list(final.iter_store_plans())
+    if scheduled_compute and not preempted:
+        assert [plan.block_id for plan in plans] == [blocks[1].block_id]
+        assert plans[0].block_hash == request.block_hashes[1]
+        assert plans[0].lookahead_token_ids == (32,)
+        assert blocks[1].ref_cnt == 2
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                    store_events={
+                        final.store_event: StoreEventResult(completed_workers=1)
+                    },
+                ),
+            )
+        )
+        assert blocks[1].ref_cnt == 1
+    else:
+        assert plans == []
+        assert blocks[1].ref_cnt == 1
+    scheduler.close()
+
+
+@pytest.mark.parametrize("disable_lookahead", [False, True])
+def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
+    config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
+    set_mtp_config(config, disable_lookahead_block_hashes=disable_lookahead)
+    kv_config = _kv_cache_config()
+    kv_config.hash_block_size = 16
+    # Force the hybrid coordinator path, including an explicitly marked draft group.
+    kv_config.kv_cache_groups.append(
+        KVCacheGroupSpec(
+            ["draft"],
+            kv_config.kv_cache_groups[0].kv_cache_spec,
+            is_eagle_group=True,
+        )
+    )
+    codec = BlockIdentityCodec(UMBPNamespace("lookahead-hit"))
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(16, sha256, config.num_hash_lookahead_tokens)
+    request = Request(
+        "r", list(range(33)), SamplingParams(max_tokens=1), None, block_hasher=hasher
+    )
+    runtime = _SchedulerHandle(
+        {
+            codec.key(block_hash, group): True
+            for block_hash in request.block_hashes
+            for group in (0, 1)
+        }
+    )
+    scheduler = UMBPStoreConnectorScheduler(config, kv_config, runtime, codec)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (
+        16 if disable_lookahead else 32,
+        True,
+    )
+    changed = Request(
+        "changed",
+        [*range(32), 99],
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=hasher,
+    )
+    assert scheduler.get_num_new_matched_tokens(changed, 0) == (16, True)
+    scheduler.close()
 
 
 def _uniform_type_kv_cache_config(

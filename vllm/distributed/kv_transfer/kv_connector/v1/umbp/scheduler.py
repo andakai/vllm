@@ -252,8 +252,11 @@ class UMBPStoreConnectorScheduler:
         ]
         model_config = getattr(vllm_config, "model_config", None)
         speculative_config = getattr(vllm_config, "speculative_config", None)
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         use_eagle = bool(
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
+            speculative_config is not None
+            and speculative_config.use_eagle_block_drop()
+            and not self.num_hash_lookahead_tokens
         )
         self.use_eagle = use_eagle
         explicit_eagle_groups = {
@@ -262,9 +265,9 @@ class UMBPStoreConnectorScheduler:
             if group.is_eagle_group
         }
         self._eagle_store_groups = (
-            explicit_eagle_groups
-            if explicit_eagle_groups or not use_eagle
-            else set(kv_cache_config.prefix_cacheable_group_ids)
+            (explicit_eagle_groups or set(kv_cache_config.prefix_cacheable_group_ids))
+            if use_eagle
+            else set()
         )
         max_model_len = getattr(
             model_config,
@@ -294,6 +297,7 @@ class UMBPStoreConnectorScheduler:
                 hash_block_size=self.hash_block_size,
                 # As core's scheduler builds its coordinator.
                 num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
                 allow_partial_hash_hits=self.enable_partial_hash_hits,
             )
             if lookup_groups
@@ -610,6 +614,7 @@ class UMBPStoreConnectorScheduler:
         tracker = self._tracker_for_request(request.request_id)
         # Core passes the request's whole table on every admission. A request
         # whose load failed is recomputed into newly allocated blocks.
+        tracker.reset()
         tracker.replace_blocks(tuple(list(group) for group in block_groups))
         if num_external_tokens <= 0:
             self._pending_loads.pop(request.request_id, None)
@@ -654,6 +659,7 @@ class UMBPStoreConnectorScheduler:
                 meta.load_requests[request.req_id] = load_plans
             else:
                 tracker = self._tracker_for_request(request.req_id)
+                tracker.has_scheduled_compute = True
                 total_tokens = (
                     request.num_computed_tokens
                     + scheduler_output.num_scheduled_tokens[request.req_id]
@@ -697,6 +703,7 @@ class UMBPStoreConnectorScheduler:
                 cached_request = self._requests.get(request_id)
                 cached_tracker = self._request_trackers.get(request_id)
                 if cached_request is not None and cached_tracker is not None:
+                    cached_tracker.has_scheduled_compute = True
                     request_index = cached_reqs.req_ids.index(request_id)
                     num_computed_tokens = cached_reqs.num_computed_tokens[request_index]
                     # num_tokens counts sampled tokens, so a decode step is still
@@ -863,6 +870,16 @@ class UMBPStoreConnectorScheduler:
                             else None
                         ),
                         block_size=self.group_block_sizes[group_id],
+                        lookahead_token_ids=(
+                            tuple(
+                                request.all_token_ids[
+                                    boundary_tokens : boundary_tokens
+                                    + self.num_hash_lookahead_tokens
+                                ]
+                            )
+                            if self.enable_kv_cache_events
+                            else ()
+                        ),
                     )
                 )
             logger.debug(
@@ -979,6 +996,7 @@ class UMBPStoreConnectorScheduler:
         block_hashes: list[bytes] = []
         parent_block_hashes: list[bytes | None] = []
         token_ids_by_block: list[tuple[int, ...]] = []
+        lookahead_token_ids: list[tuple[int, ...]] = []
         block_sizes: list[int] = []
         block_groups = (
             block_ids_override
@@ -1041,6 +1059,14 @@ class UMBPStoreConnectorScheduler:
                     else ()
                 )
                 block_sizes.append(group_block_size)
+                if self.enable_kv_cache_events and self.num_hash_lookahead_tokens:
+                    lookahead_token_ids.append(
+                        tuple(
+                            request.all_token_ids[
+                                token_end : token_end + self.num_hash_lookahead_tokens
+                            ]
+                        )
+                    )
         return BlockStoreBatch(
             keys,
             source_block_ids,
@@ -1050,6 +1076,7 @@ class UMBPStoreConnectorScheduler:
             token_ids_by_block,
             block_sizes,
             request_id,
+            lookahead_token_ids=lookahead_token_ids,
         )
 
     def _restored_store_blocks(
@@ -1157,6 +1184,7 @@ class UMBPStoreConnectorScheduler:
     def request_finished(
         self, request: Request, block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
+        self._register_finished_lookahead_save(request, block_ids)
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
         self._requests.pop(request.request_id, None)
@@ -1164,6 +1192,54 @@ class UMBPStoreConnectorScheduler:
         if pending is not None:
             pending.future.cancel()
         return False, None
+
+    def _register_finished_lookahead_save(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> None:
+        """Pin completed KV whose hash became available with the last sample."""
+        pool = self._gpu_block_pool
+        tracker = self._request_trackers.get(request.request_id)
+        if (
+            not self.store_enabled
+            or not self.num_hash_lookahead_tokens
+            or self.codec is None
+            or pool is None
+            or tracker is None
+            or not tracker.has_scheduled_compute
+        ):
+            return
+        completed_tokens = request.num_computed_tokens - (
+            request.num_in_flight_tokens - request.num_stale_output_tokens
+        )
+        save_limit = (
+            request.num_tokens if self.save_decode_cache else request.num_prompt_tokens
+        )
+        pending = self._pending_finished_stores.get(request.request_id, [])
+        reserved_keys = {
+            key for event in self._store_events.values() for key in event.iter_keys()
+        }
+        reserved_keys.update(plan.key for plan in pending)
+        plans = self._store_plans(
+            request,
+            tracker,
+            min(completed_tokens, save_limit),
+            block_ids_override=tuple(
+                block_ids[group_id]
+                for group_id in self.kv_cache_config.prefix_cacheable_group_ids
+            ),
+            skip_keys=reserved_keys,
+        )
+        if not plans:
+            return
+        pinned = {plan.block_id for plan in pending}
+        pool.touch(
+            [
+                pool.blocks[block_id]
+                for block_id in dict.fromkeys(plans.block_ids)
+                if block_id not in pinned
+            ]
+        )
+        self._pending_finished_stores[request.request_id] = [*pending, *plans]
 
     def register_finished_partial_tail(
         self,
@@ -1233,6 +1309,15 @@ class UMBPStoreConnectorScheduler:
                     key=self.codec.key(request.block_hashes[hash_index], group_id),
                     block_hash=request.block_hashes[hash_index],
                     block_size=group_block_size,
+                    lookahead_token_ids=(
+                        tuple(
+                            request.all_token_ids[
+                                boundary : boundary + self.num_hash_lookahead_tokens
+                            ]
+                        )
+                        if self.enable_kv_cache_events
+                        else ()
+                    ),
                 )
             )
         # A Mamba page is a state snapshot, not a token-addressable byte array.
@@ -1372,6 +1457,11 @@ class UMBPStoreConnectorScheduler:
                                 else None
                             ),
                             token_ids=list(plan.token_ids),
+                            lookahead_token_ids=(
+                                [list(plan.lookahead_token_ids)]
+                                if plan.lookahead_token_ids
+                                else None
+                            ),
                             block_size=plan.block_size,
                             lora_id=None,
                             medium=plan.medium,
