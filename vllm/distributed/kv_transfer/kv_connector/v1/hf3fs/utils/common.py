@@ -114,17 +114,21 @@ class HF3FSRequestMetadata:
             else skip_leading_blocks
         )
 
-        new_blocks_to_save = total_blocks - state.num_saved_blocks
+        new_blocks_to_save = total_blocks - skip_blocks
         if new_blocks_to_save <= 0 and load_op is None:
             return None
 
         state.num_saved_blocks = total_blocks
         return HF3FSRequestMetadata(
             request_id=state.request_id,
-            token_ids=state.token_ids,
-            block_ids=state.allocated_block_ids,
+            token_ids=state.token_ids.copy(),
+            block_ids=state.allocated_block_ids.copy(),
             load_block_op=load_op,
-            save_block_op=SaveBlockInfo(skip_leading_blocks=skip_blocks),
+            save_block_op=(
+                SaveBlockInfo(skip_leading_blocks=skip_blocks)
+                if new_blocks_to_save > 0
+                else None
+            ),
         )
 
 
@@ -133,6 +137,7 @@ class HF3FSConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
         self.requests: list[HF3FSRequestMetadata] = []
+        self.preempted_req_ids: set[str] = set()
 
     def add_request(self, request_metadata: HF3FSRequestMetadata) -> None:
         """Add request to metadata."""

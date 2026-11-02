@@ -234,3 +234,10 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 **Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
 ![Example Time 6](../assets/design/prefix_caching/example-time-7.png)
+
+### HF3FS transfer ownership
+
+HF3FS drains pending transfers before reusing a preempted request's blocks.
+Aborted requests retain destination blocks until all load batches complete; failed
+loads report their destination blocks to the scheduler. Resumed requests use the
+replacement block table and current computed-token boundary.
