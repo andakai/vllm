@@ -48,8 +48,14 @@ class ReqMeta:
         block_size: int,
         is_store: bool,
         mm_hashes: list[str],
+        cache_key: str | None = None,
     ) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(token_ids), block_size)
+        # Lookahead entries already carry an aligned, hash-covered KV range.
+        valid_num_tokens = (
+            len(token_ids)
+            if cache_key is not None
+            else align_to_block_size(len(token_ids), block_size)
+        )
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
@@ -64,6 +70,7 @@ class ReqMeta:
             slot_mapping=slot_mapping,
             is_store=is_store,
             mm_hashes=mm_hashes,
+            cache_key=cache_key,
         )
 
 
@@ -104,7 +111,7 @@ class ExampleConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._lookahead = vllm_config.num_hash_lookahead_tokens
         self._kv_caches: dict[str, torch.Tensor] = {}
-        self._pending_stores: dict[str, tuple[Request, list[int]]] = {}
+        self._pending_requests: dict[str, tuple[Request, list[int], bool]] = {}
         self._requests_need_load: dict[str, Request] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
@@ -412,13 +419,14 @@ class ExampleConnector(KVConnectorBase_V1):
         If blocks were allocated, add to _requests_need_load,
         such that we load the KVs in the next forward pass.
         """
-        if num_external_tokens > 0:
-            self._requests_need_load[request.request_id] = request
-        elif self._lookahead:
-            self._pending_stores[request.request_id] = (
+        if self._lookahead:
+            self._pending_requests[request.request_id] = (
                 request,
                 blocks.get_block_ids()[0].copy(),
+                num_external_tokens == 0,
             )
+        elif num_external_tokens > 0:
+            self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
         self,
@@ -524,56 +532,43 @@ class ExampleConnector(KVConnectorBase_V1):
     ) -> ExampleConnectorMetadata:
         meta = ExampleConnectorMetadata()
         for req_id in output.finished_req_ids | (output.preempted_req_ids or set()):
-            self._pending_stores.pop(req_id, None)
+            self._pending_requests.pop(req_id, None)
         cached = output.scheduled_cached_reqs
-        blocks_by_request = {
-            req.req_id: req.block_ids[0] for req in output.scheduled_new_reqs
-        }
         for i, req_id in enumerate(cached.req_ids):
             new_blocks = cached.new_block_ids[i]
-            if req_id in cached.resumed_req_ids:
-                assert new_blocks is not None
-                blocks_by_request[req_id] = new_blocks[0]
-            elif req_id in self._pending_stores and new_blocks is not None:
-                self._pending_stores[req_id][1].extend(new_blocks[0])
+            # New and resumed requests already received their full block list
+            # in update_state_after_alloc; running requests only send additions.
+            if (
+                req_id not in cached.resumed_req_ids
+                and req_id in self._pending_requests
+                and new_blocks is not None
+            ):
+                self._pending_requests[req_id][1].extend(new_blocks[0])
 
-        requests = [
-            (request, blocks_by_request[req_id], False)
-            for req_id, request in self._requests_need_load.items()
-        ]
-        self._requests_need_load.clear()
-        requests.extend(
-            (request, blocks, True)
-            for request, blocks in self._pending_stores.values()
-            if request.request_id in output.num_scheduled_tokens
-        )
-        for request, blocks, is_store in requests:
+        for req_id, num_scheduled in output.num_scheduled_tokens.items():
+            pending = self._pending_requests.get(req_id)
+            if pending is None:
+                continue
+            request, blocks, is_store = pending
             entry = self._lookahead_cache_entry(request)
             if entry is None:
-                self._pending_stores.pop(request.request_id, None)
+                self._pending_requests.pop(req_id)
                 continue
             key, num_tokens = entry
-            if is_store and (
-                request.num_computed_tokens
-                + output.num_scheduled_tokens[request.request_id]
-                < num_tokens
-            ):
+            if is_store and (request.num_computed_tokens + num_scheduled < num_tokens):
                 continue
-            slots = (
-                torch.tensor(blocks)[:, None] * self._block_size
-                + torch.arange(self._block_size)
-            ).flatten()[:num_tokens]
-            assert len(slots) == num_tokens
+            assert len(blocks) * self._block_size >= num_tokens
             meta.requests.append(
-                ReqMeta(
-                    torch.tensor(request.all_token_ids[:num_tokens]),
-                    slots,
+                ReqMeta.make_meta(
+                    request.all_token_ids[:num_tokens],
+                    blocks,
+                    self._block_size,
                     is_store,
                     [],
-                    key,
+                    cache_key=key,
                 )
             )
-            self._pending_stores.pop(request.request_id, None)
+            self._pending_requests.pop(req_id)
         return meta
 
     def _found_match_for_request(

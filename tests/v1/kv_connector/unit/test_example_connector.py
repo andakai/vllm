@@ -117,7 +117,10 @@ def test_lookahead_eagle3_chunked_prefill(vllm_runner, tmp_path):
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("hash_block_size", [8, 16])
 @pytest.mark.parametrize("lookahead", [1, 17])
-def test_lookahead_atomic_store_and_restore(tmp_path, hash_block_size, lookahead):
+@pytest.mark.parametrize("preempt", [False, True])
+def test_lookahead_atomic_store_and_restore(
+    tmp_path, hash_block_size, lookahead, preempt
+):
     """Publish target/draft KV together, keyed by the complete lookahead window."""
     config = create_vllm_config(
         kv_connector="ExampleConnector",
@@ -165,6 +168,22 @@ def test_lookahead_atomic_store_and_restore(tmp_path, hash_block_size, lookahead
     blocks = KVCacheBlocks(([KVCacheBlock(1)],))
     scheduler.update_state_after_alloc(req, blocks, 0)
     assert scheduler.build_connector_meta(step(req, [1], 16)).requests == []
+    first_block = 1
+    if preempt:
+        output = SchedulerOutput.make_empty()
+        output.preempted_req_ids = {req.request_id}
+        assert scheduler.build_connector_meta(output).requests == []
+        # Resumption supplies the full replacement allocation, not additions.
+        first_block = 3
+        scheduler.update_state_after_alloc(
+            req, KVCacheBlocks(([KVCacheBlock(first_block)],)), 0
+        )
+        output = step(req, [], 16)
+        output.scheduled_new_reqs = []
+        output.scheduled_cached_reqs.req_ids = [req.request_id]
+        output.scheduled_cached_reqs.resumed_req_ids = {req.request_id}
+        output.scheduled_cached_reqs.new_block_ids = [([first_block],)]
+        assert scheduler.build_connector_meta(output).requests == []
     req.num_computed_tokens = 16
     continuation = step(req, [], 16)
     continuation.scheduled_new_reqs = []
@@ -182,7 +201,7 @@ def test_lookahead_atomic_store_and_restore(tmp_path, hash_block_size, lookahead
     worker.bind_connector_metadata(meta)
     # Draft KV is finalized after metadata creation, before wait_for_save.
     layers["draft"].add_(1000)
-    expected = {name: layer[1:3].clone() for name, layer in layers.items()}
+    expected = {name: layer[[first_block, 2]].clone() for name, layer in layers.items()}
     worker.wait_for_save()
     worker.clear_connector_metadata()
     assert len(list(tmp_path.iterdir())) == 1

@@ -122,30 +122,20 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             # lazy import
             from vllm.distributed.kv_transfer.kv_connector.v1 import lmcache_integration
 
-            _adapter = lmcache_integration.vllm_v1_adapter
-
-            if vllm_config.num_hash_lookahead_tokens:
-                raise ValueError(
-                    "Use the external LMCache adapter for lookahead hashes"
-                )
-            self._lmcache_engine = _adapter.LMCacheConnectorV1Impl(
-                vllm_config, role, self
-            )
+            adapter_cls = lmcache_integration.vllm_v1_adapter.LMCacheConnectorV1Impl
         else:
             logger.info("Initializing latest dev LMCache connector")
-            # lazy import
-            LMCacheConnectorLatestImpl = _get_lmcache_adapter_class()
+            adapter_cls = _get_lmcache_adapter_class()
 
-            if getattr(LMCacheConnectorLatestImpl, "LOOKAHEAD_HASHES_VERSION", 0) == 1:
-                self._lmcache_engine = LMCacheConnectorLatestImpl(
-                    vllm_config, role, self, kv_cache_config=kv_cache_config
-                )
-            else:
-                if vllm_config.num_hash_lookahead_tokens:
-                    raise ValueError("Upgrade LMCache to use lookahead block hashes")
-                self._lmcache_engine = LMCacheConnectorLatestImpl(
-                    vllm_config, role, self
-                )
+        supports_lookahead = (
+            not use_native and getattr(adapter_cls, "LOOKAHEAD_HASHES_VERSION", 0) == 1
+        )
+        if vllm_config.num_hash_lookahead_tokens and not supports_lookahead:
+            raise ValueError(
+                "Lookahead hashes require a compatible external LMCache adapter"
+            )
+        kwargs = {"kv_cache_config": kv_cache_config} if supports_lookahead else {}
+        self._lmcache_engine = adapter_cls(vllm_config, role, self, **kwargs)
 
         self._kv_cache_events: LMCacheKVEvents | None = None
 
