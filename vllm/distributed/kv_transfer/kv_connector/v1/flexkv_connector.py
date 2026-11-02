@@ -53,6 +53,13 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
     """
 
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
+        spec = vllm_config.speculative_config
+        if spec is not None and spec.use_eagle():
+            return "LBNHC"
+        return None
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
