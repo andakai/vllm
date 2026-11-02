@@ -298,3 +298,11 @@ the vendors' own installation instructions.
 ## Further reading
 
 - [Next-Level Inference: Why Your Single-Node vLLM Setup Needs Prefill-Decode Disaggregation](https://vllm.ai/blog/2026-04-07-moriio-kv-connector).
+
+## Hybrid MTP in WRITE mode
+
+Hybrid WRITE supports MTP as well as DSpark. Other speculative methods remain
+unsupported in hybrid WRITE mode; this does not enable general EAGLE support.
+The producer and decoder leave the same Mamba or multi-module MTP tail for local
+recomputation. For Qwen3.6 hybrid MTP, use `VLLM_SSM_CONV_STATE_LAYOUT=DS` and
+`VLLM_ROCM_USE_AITER=0` on both peers. Hash lookahead remains a separate setting.

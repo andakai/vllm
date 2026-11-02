@@ -617,7 +617,7 @@ class UMBPStoreConnectorScheduler:
         tracker = self._tracker_for_request(request.request_id)
         # Core passes the request's whole table on every admission. A request
         # whose load failed is recomputed into newly allocated blocks.
-        tracker.reset()
+        tracker.has_scheduled_compute = False
         tracker.replace_blocks(tuple(list(group) for group in block_groups))
         if num_external_tokens <= 0:
             self._pending_loads.pop(request.request_id, None)

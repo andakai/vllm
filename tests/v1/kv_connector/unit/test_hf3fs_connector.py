@@ -63,8 +63,8 @@ def hf3fs_scheduler_factory(monkeypatch):
     init_none_hash(sha256)
 
     def create(
-        hash_block_size,
-        lookahead,
+        hash_block_size=16,
+        lookahead=0,
         role=KVConnectorRole.SCHEDULER,
         extra=None,
         block_size=16,
@@ -112,8 +112,8 @@ def _hashed_request(tokens, hash_block_size, lookahead):
     )
 
 
-@pytest.fixture
-def hf3fs_worker(hf3fs_scheduler_factory, monkeypatch, tmp_path, dist_init):
+@pytest.fixture(params=[0, 1])
+def hf3fs_worker(hf3fs_scheduler_factory, monkeypatch, tmp_path, dist_init, request):
     """Run real CUDA resources and I/O threads against the file-backed client."""
     monkeypatch.setattr(
         "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs."
@@ -122,7 +122,7 @@ def hf3fs_worker(hf3fs_scheduler_factory, monkeypatch, tmp_path, dist_init):
     )
     worker, _, _ = hf3fs_scheduler_factory(
         4,
-        1,
+        request.param,
         KVConnectorRole.WORKER,
         dict(
             hf3fs_storage_path=str(tmp_path),
@@ -550,3 +550,52 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+@pytest.mark.cpu_test
+def test_legacy_resume_replaces_old_blocks_and_uses_current_computed_boundary(
+    hf3fs_scheduler_factory,
+):
+    """Recomputed KV after preemption must not be read from the old allocation."""
+    connector, _, _ = hf3fs_scheduler_factory()
+    request = Request("test", list(range(49)), SamplingParams(max_tokens=8), None)
+    connector.get_num_new_matched_tokens(request, 0)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([],)), 0)
+
+    def scheduled(new_reqs, cached_reqs, num_tokens):
+        return SchedulerOutput(
+            scheduled_new_reqs=new_reqs,
+            scheduled_cached_reqs=cached_reqs,
+            num_scheduled_tokens={request.request_id: num_tokens},
+            total_num_scheduled_tokens=num_tokens,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+    initial = scheduled(
+        [NewRequestData.from_request(request, ([1, 2],))],
+        CachedRequestData.make_empty(),
+        32,
+    )
+    assert connector.build_connector_meta(initial).requests[0].block_ids == [1, 2]
+    output = scheduled(
+        [],
+        CachedRequestData(
+            req_ids=[request.request_id],
+            resumed_req_ids={request.request_id},
+            num_computed_tokens=[0],
+            new_block_ids=[([6, 7],)],
+            new_token_ids=[],
+            all_token_ids={},
+            num_output_tokens=[0],
+        ),
+        16,
+    )
+    metadata = connector.build_connector_meta(output)
+    assert len(metadata.requests) == 1
+    saved = metadata.requests[0]
+    assert saved.block_ids == [6, 7]
+    assert saved.token_ids == list(range(16))
+    assert saved.save_block_op.skip_leading_blocks == 0

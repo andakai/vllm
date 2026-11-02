@@ -504,7 +504,7 @@ def test_scheduler_rejects_mamba_group_without_two_states():
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
-def test_scheduler_rejects_non_dspark_speculative_hybrid_write():
+def test_scheduler_rejects_unsupported_speculative_hybrid_write():
     config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
@@ -559,13 +559,14 @@ def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
 @pytest.mark.parametrize(
     "dcp_size,dcp_sharded,expected_tail", [(1, True, 4), (4, True, 1), (4, False, 4)]
 )
-def test_scheduler_accepts_dspark_with_wrapped_full_attention(
-    dcp_size, dcp_sharded, expected_tail, read_mode
+@pytest.mark.parametrize("method", ["dspark", "mtp"])
+def test_scheduler_accepts_speculation_with_wrapped_full_attention(
+    dcp_size, dcp_sharded, expected_tail, read_mode, method
 ):
     config = _dspark_wrapped_attention_config(dcp_sharded=dcp_sharded)
     vllm_config = _gate_vllm_config(
         read_mode=read_mode,
-        speculative_config=_spec_config("dspark"),
+        speculative_config=_spec_config(method),
         block_size=4,
         num_lookahead_tokens=7,
         num_speculative_tokens=7,
@@ -1767,3 +1768,28 @@ def test_worker_rejects_missing_mamba_block_group():
 
     with pytest.raises(moriio_common.MoRIIOError, match="no block group"):
         worker._mamba_blocks_for_layer("kda.0", ([10], [40]))
+
+
+@pytest.mark.parametrize("tail", [1, 2, 4])
+@pytest.mark.parametrize("read_mode", [True, False])
+def test_prefill_tail_matches_consumer_recomputation(tail, read_mode):
+    """Both peers leave the same multi-module MTP tail for the decoder."""
+    config = _gate_vllm_config()
+    config.num_prefill_lookahead_tokens = tail + 1
+    producer = _FakeScheduler(is_producer=True, _has_mamba=True, vllm_config=config)
+    request = _mk_request(list(range(32)), params={"do_remote_decode": True})
+    producer.on_new_request(request)
+    assert request.prompt_token_ids == list(range(32 - tail))
+    producer.on_new_request(request)
+    assert request.num_prompt_tokens == 32 - tail
+    consumer = _FakeScheduler(
+        is_producer=False,
+        _has_mamba=True,
+        vllm_config=config,
+        mode=MoRIIOMode.READ if read_mode else MoRIIOMode.WRITE,
+    )
+    request = _mk_request(list(range(32)), params={"do_remote_prefill": True})
+    assert consumer.get_num_new_matched_tokens(request, 16) == (
+        16 - tail,
+        not read_mode,
+    )

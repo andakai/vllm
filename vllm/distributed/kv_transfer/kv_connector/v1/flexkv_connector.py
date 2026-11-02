@@ -66,8 +66,8 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        # FlexKV transfers derive token-major strides from the cache shape.
-        if vllm_config.num_hash_lookahead_tokens:
+        spec = vllm_config.speculative_config
+        if spec is not None and spec.use_eagle():
             return "LBNHC"
         return None
 
