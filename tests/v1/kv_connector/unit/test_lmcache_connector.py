@@ -1,16 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from collections.abc import Iterator
+from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
 
+from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 
 
@@ -816,3 +823,25 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
         connector.clear_connector_metadata()
 
     assert connector._lmcache_engine.layerwise_storers == []
+
+
+@pytest.mark.parametrize("inprocess_module", [False, True])
+def test_constructs_external_adapter_at_current_or_legacy_path(
+    monkeypatch, inprocess_module
+):
+    calls = []
+
+    class ExternalAdapter:
+        def __init__(self, config, role, parent):
+            calls.append((config, role, parent))
+
+    new_path = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
+    old_path = "lmcache.integration.vllm.vllm_v1_adapter"
+    module = ModuleType(new_path if inprocess_module else old_path)
+    module.LMCacheConnectorV1Impl = ExternalAdapter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setitem(sys.modules, old_path if inprocess_module else new_path, None)
+    config = create_vllm_config(kv_connector="LMCacheConnectorV1")
+    cache = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
+    connector = LMCacheConnectorV1(config, KVConnectorRole.SCHEDULER, cache)
+    assert calls == [(config, KVConnectorRole.SCHEDULER, connector)]
