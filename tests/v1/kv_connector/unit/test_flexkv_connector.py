@@ -240,7 +240,9 @@ def test_speculative_transfer_layout_does_not_depend_on_hash_lookahead(method):
     config = VllmConfig()
     if method is not None:
         config.speculative_config = SpeculativeConfig(
-            model="ngram", num_speculative_tokens=4
+            model="ngram",
+            num_speculative_tokens=4,
+            disable_lookahead_block_hashes=True,
         )
         config.speculative_config.method = method
     assert config.num_hash_lookahead_tokens == 0
