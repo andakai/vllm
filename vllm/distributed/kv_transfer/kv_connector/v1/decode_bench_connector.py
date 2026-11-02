@@ -71,7 +71,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import KVTransferConfig, VllmConfig
+    from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -142,12 +142,6 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     prefill-decode disaggregated setting, enabling performance testing of the
     decoder with larger input sequence lengths.
     """
-
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        return True
 
     def __init__(
         self,
