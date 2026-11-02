@@ -138,11 +138,21 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 
 ### Hybrid attention and recurrent state
 
-WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark. Use matching cache layouts on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
+WRITE mode supports hybrid attention plus Mamba/KDA models with DSpark or MTP. Use matching cache layouts and draft configurations on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Existing sliding-window WRITE restrictions still apply; other hybrid speculative methods remain unsupported.
+
+Recurrent convolution state transfer requires `VLLM_SSM_CONV_STATE_LAYOUT=DS`
+on both endpoints. For Qwen Gated DeltaNet models, set `VLLM_ROCM_USE_AITER=0`
+when using this layout, since AITER's convolution-update path requires SD.
 
 For DSpark, configure the same draft model on both instances through `--speculative-config`. Target and draft attention groups retain their own block IDs and token spans; only the running recurrent state is transferred, not speculative scratch slots. The producer transfers the state after the first N-1 prompt tokens, and the consumer recomputes the last prompt token. Convolution and SSM transfers must both finish before the layer is complete.
 
 Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
+
+MoRIIO supports core lookahead block hashing. When the producer truncates the
+prompt, it discards hashes that depend on the removed tokens. With multiple MTP
+modules, it also leaves the required trailing tokens for the decoder to
+recompute. Both endpoints must use the same lookahead configuration. Disabling
+lookahead hashing retains the legacy EAGLE block-drop path.
 
 ### Kimi-K3 specialized decode
 
