@@ -335,6 +335,12 @@ steps:
     - vllm/config/
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
+    - vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/lmcache_mp_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/umbp/connector.py
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
@@ -365,6 +371,20 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
+
+- label: ":nvidia: (H200 MIG 18GB) Example Connector Lookahead"
+  key: example-connector-lookahead
+  timeout_in_minutes: 15
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+    - vllm/config/
+    - vllm/v1/worker/gpu/kv_connector.py
+    - tests/v1/kv_connector/unit/test_example_connector.py
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s v1/kv_connector/unit/test_example_connector.py::test_lookahead_eagle3_chunked_prefill
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration

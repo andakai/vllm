@@ -99,6 +99,26 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
+## HF3FS with speculative lookahead
+
+When core lookahead hashing is enabled, `HF3FSKVConnector` uses the request's
+core hashes for both lookup and storage. The hash at each storage-block boundary
+includes the required subsequent tokens, even when the core hash block is smaller
+than the storage block. Scheduler metadata snapshots these keys for the worker;
+having a key does not authorize saving KV beyond the scheduled computation.
+
+Lookahead keys use a separate versioned namespace derived from the model, draft,
+parallel and cache configuration. They do not reuse legacy token-only entries.
+With lookahead disabled, HF3FS retains its existing token-key path. This does not
+change HF3FS's uniform-cache-layout requirement or add hybrid cache support.
+
+Before reusing preempted blocks, the worker waits for their outstanding transfers.
+An aborted request retains its destination blocks until all load batches finish,
+and failed batches are reported to the scheduler for recomputation. Resumed
+requests use the replacement allocation and current computed-token boundary.
+No extra finish-time save is queued: a block whose lookahead hash becomes
+available only at the final sample may remain absent from external storage.
+
 ## Data Structure
 
 The prefix caching in vLLM v1 is implemented in the KV cache manager. The basic building block is the “Block” data class (simplified):

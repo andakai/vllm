@@ -17,6 +17,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.config import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
@@ -53,6 +54,23 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
     """
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        try:
+            from flexkv.integration.vllm.vllm_v1_adapter import FlexKVConnectorV1Impl
+        except ImportError:
+            return False
+        return getattr(FlexKVConnectorV1Impl, "LOOKAHEAD_HASHES_VERSION", 0) == 1
+
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
+        # FlexKV transfers derive token-major strides from the cache shape.
+        if vllm_config.num_hash_lookahead_tokens:
+            return "LBNHC"
+        return None
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -71,7 +89,14 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
                 "for installation instructions."
             ) from e
 
-        self._flexkv_connector = FlexKVConnectorV1Impl(vllm_config, role)
+        if getattr(FlexKVConnectorV1Impl, "LOOKAHEAD_HASHES_VERSION", 0) == 1:
+            self._flexkv_connector = FlexKVConnectorV1Impl(
+                vllm_config, role, kv_cache_config=kv_cache_config
+            )
+        else:
+            if vllm_config.num_hash_lookahead_tokens:
+                raise ValueError("Upgrade FlexKV to use lookahead block hashes")
+            self._flexkv_connector = FlexKVConnectorV1Impl(vllm_config, role)
 
     def shutdown(self):
         self._flexkv_connector.shutdown()
