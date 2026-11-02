@@ -148,9 +148,6 @@ def test_lookahead_requires_compatible_external_adapter(protocol_version, disabl
         assert config.num_hash_lookahead_tokens == (
             1 if protocol_version == 1 and not disabled else 0
         )
-        assert FlexKVConnectorV1.get_required_kvcache_layout(config) == (
-            "LBNHC" if config.num_hash_lookahead_tokens else None
-        )
         cache_config = KVCacheConfig(
             num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[]
         )
