@@ -73,6 +73,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     def __init__(self, **attrs):
         self.mode = MoRIIOMode.READ
         self._mamba_group_ids: list[int] = []
+        self._has_mamba = False
         self._attn_group_ids: list[int] = [0]
         self._attn_group_is_state: list[bool] = [False]
         self._num_ssm_scratch_blocks = 0
@@ -177,6 +178,7 @@ def _gate_vllm_config(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         num_lookahead_tokens=num_lookahead_tokens,
         num_hash_lookahead_tokens=0,
+        num_prefill_lookahead_tokens=0,
         num_speculative_tokens=num_speculative_tokens,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
@@ -1377,13 +1379,14 @@ def _mk_request(prompt, max_tokens=64, params=None):
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
-@pytest.mark.parametrize("lookahead", [0, 1, 2])
-def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
+@pytest.mark.parametrize("lookahead", [0, 1, 2, 4])
+@pytest.mark.parametrize("read_mode", [False, True])
+def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead, read_mode):
     config = create_vllm_config(
         kv_connector="MoRIIOConnector",
         kv_role="kv_producer",
         kv_connector_extra_config={
-            "read_mode": True,
+            "read_mode": read_mode,
             "host_ip": "127.0.0.1",
             "handshake_port": 6001,
             "notify_port": 6002,
@@ -1427,9 +1430,10 @@ def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
     )
     assert len(request.block_hashes) == 2
     scheduler.on_new_request(request)
+    num_prefill_tokens = 32 + lookahead - max(1, lookahead - 1)
     expected = Request(
         "expected",
-        list(range(31 + lookahead)),
+        list(range(num_prefill_tokens)),
         SamplingParams(max_tokens=1),
         None,
         block_hasher=hasher,
@@ -1437,8 +1441,26 @@ def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
     assert request.block_hashes == expected.block_hashes
     assert len(request.block_hashes) == 1
     scheduler.on_new_request(request)
-    assert request.num_prompt_tokens == 31 + lookahead
+    assert request.num_prompt_tokens == num_prefill_tokens
     assert request.block_hashes == expected.block_hashes
+    config.kv_transfer_config.kv_role = "kv_consumer"
+    consumer = moriio_connector.MoRIIOConnectorScheduler(config, "decode", kv_config)
+    decode_request = Request(
+        "decode",
+        list(range(32 + lookahead)),
+        SamplingParams(
+            max_tokens=1,
+            extra_args={
+                "kv_transfer_params": {"do_remote_prefill": True},
+            },
+        ),
+        None,
+        block_hasher=hasher,
+    )
+    assert consumer.get_num_new_matched_tokens(decode_request, 16) == (
+        num_prefill_tokens - 16,
+        not read_mode,
+    )
 
 
 def test_truncate_mamba_request_pops_last_token_and_caps_tokens():

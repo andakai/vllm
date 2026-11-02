@@ -137,12 +137,13 @@ class _EventLookup:
 class _LookupBlockPool(BlockPool):
     """Request-scoped residency view for the core hit-window algorithms."""
 
-    def __init__(self, hash_block_size: int) -> None:
+    def __init__(self, hash_block_size: int, num_hash_lookahead_tokens: int) -> None:
         super().__init__(
             num_gpu_blocks=1,
             enable_caching=True,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=False,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         self.hits: list[set[bytes]] = []
         self.hit_blocks: dict[bytes, KVCacheBlock] = {}
@@ -310,7 +311,9 @@ class UMBPStoreConnectorScheduler:
             )
             else None
         )
-        self._lookup_pool = _LookupBlockPool(self.hash_block_size)
+        self._lookup_pool = _LookupBlockPool(
+            self.hash_block_size, self.num_hash_lookahead_tokens
+        )
         self._local_cache_lookup: Callable[[int, bytes], bool] | None = None
         if self._lookup_coordinator is not None:
             self._lookup_coordinator.block_pool = self._lookup_pool
@@ -525,7 +528,7 @@ class UMBPStoreConnectorScheduler:
         assert self.codec is not None
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
-        lookup_limit = request.num_tokens - 1
+        lookup_limit = min(request.num_tokens - 1, len(hashes) * self.hash_block_size)
         if self.use_eagle and self._lookup_coordinator is not None:
             lookup_limit = min(request.num_tokens, len(hashes) * self.hash_block_size)
         for group_id, unit in self._lookup_units.items():

@@ -99,6 +99,11 @@ This default is a compatibility contract, not certification of arbitrary
 third-party code. The legacy EAGLE block-drop path and explicit
 `disable_lookahead_block_hashes` setting remain available.
 
+MoRIIO hybrid WRITE supports DSpark and MTP. Both endpoints must use the same
+draft configuration; the producer leaves the Mamba state or multi-module MTP
+tail for the decoder to recompute locally. Sliding-window WRITE with speculative
+decoding remains unsupported.
+
 ## Reusing prefill token ids on decode
 
 !!! note

@@ -177,9 +177,14 @@ def test_lookahead_finish_saves_only_computed_kv(
 
 
 @pytest.mark.parametrize("disable_lookahead", [False, True])
-def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
+@pytest.mark.parametrize("lookahead", [1, 4])
+def test_external_hit_uses_the_same_lookahead_policy_as_core(
+    disable_lookahead, lookahead
+):
     config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
-    set_mtp_config(config, disable_lookahead_block_hashes=disable_lookahead)
+    set_mtp_config(config, lookahead, disable_lookahead_block_hashes=disable_lookahead)
+    config.model_config.hf_config.n_predict = lookahead
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     kv_config = _kv_cache_config()
     kv_config.hash_block_size = 16
     # Force the hybrid coordinator path, including an explicitly marked draft group.
@@ -194,7 +199,11 @@ def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
     init_none_hash(sha256)
     hasher = get_request_block_hasher(16, sha256, config.num_hash_lookahead_tokens)
     request = Request(
-        "r", list(range(33)), SamplingParams(max_tokens=1), None, block_hasher=hasher
+        "r",
+        list(range(32 + lookahead)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=hasher,
     )
     runtime = _SchedulerHandle(
         {
@@ -210,12 +219,21 @@ def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
     )
     changed = Request(
         "changed",
-        [*range(32), 99],
+        [*range(32), 99, *range(33, 32 + lookahead)],
         SamplingParams(max_tokens=1),
         None,
         block_hasher=hasher,
     )
     assert scheduler.get_num_new_matched_tokens(changed, 0) == (16, True)
+    if lookahead > 1:
+        short = Request(
+            "short",
+            list(range(33)),
+            SamplingParams(max_tokens=1),
+            None,
+            block_hasher=hasher,
+        )
+        assert scheduler.get_num_new_matched_tokens(short, 0) == (16, True)
     scheduler.close()
 
 
