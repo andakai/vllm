@@ -113,7 +113,8 @@ class AsyncOperationManager:
 
         # Operation tracking
         self._save_futures: dict[str, list[Future]] = {}
-        self._load_futures: dict[str, Future] = {}
+        self._load_futures: dict[str, list[tuple[Future, list[int]]]] = {}
+        self._invalid_block_ids: set[int] = set()
         self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
@@ -183,8 +184,21 @@ class AsyncOperationManager:
         future: Future[Any] = Future()
         task = (request_id, block_ids, block_hashes, future)
         self._load_queue.put(task)
-        self._load_futures[request_id] = future
+        self._load_futures.setdefault(request_id, []).append((future, block_ids.copy()))
         return future
+
+    def wait_for_preempted_requests(self, request_ids: set[str]) -> None:
+        """Finish transfers before a preempted request's blocks are overwritten."""
+        for request_id in request_ids:
+            for future in self._save_futures.pop(request_id, []):
+                future.result()
+            for future, _ in self._load_futures.pop(request_id, []):
+                future.result()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return failed destination blocks since the last completion poll."""
+        invalid, self._invalid_block_ids = self._invalid_block_ids, set()
+        return invalid
 
     def get_finished_operations(
         self, finished_req_ids: set[str]
@@ -205,38 +219,34 @@ class AsyncOperationManager:
         """Check for completed save operations."""
         completed = set()
 
-        # Check pending finished requests first
-        for request_id in list(self._pending_finished_requests):
-            if request_id in self._save_futures and self._all_saves_done(request_id):
+        # Aborted loads also own destination blocks until the I/O has stopped.
+        for request_id in self._pending_finished_requests | finished_req_ids:
+            if self._all_saves_done(request_id) and all(
+                future.done() for future, _ in self._load_futures.get(request_id, [])
+            ):
                 completed.add(request_id)
-                self._save_futures.pop(request_id)
-                self._pending_finished_requests.remove(request_id)
-
-        # Process newly finished requests
-        for request_id in finished_req_ids:
-            if request_id in self._save_futures:
-                if self._all_saves_done(request_id):
-                    completed.add(request_id)
-                    self._save_futures.pop(request_id)
-                else:
-                    self._pending_finished_requests.add(request_id)
+                self._save_futures.pop(request_id, None)
+                self._pending_finished_requests.discard(request_id)
             else:
-                completed.add(request_id)
+                self._pending_finished_requests.add(request_id)
 
         return completed
 
     def _check_completed_loads(self) -> set[str]:
         """Check for completed load operations."""
         completed = set()
-        for request_id in list(self._load_futures):
-            if self._load_futures[request_id].done():
+        for request_id, batches in list(self._load_futures.items()):
+            if all(future.done() for future, _ in batches):
+                for future, block_ids in batches:
+                    if not future.result():
+                        self._invalid_block_ids.update(block_ids)
                 completed.add(request_id)
                 self._load_futures.pop(request_id)
         return completed
 
     def _all_saves_done(self, request_id: str) -> bool:
         """Check if all save operations for a request are completed."""
-        return all(future.done() for future in self._save_futures[request_id])
+        return all(future.done() for future in self._save_futures.get(request_id, []))
 
     def _save_worker(self) -> None:
         """Background worker for handling save operations."""
@@ -632,6 +642,15 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     request.request_id, batch_block_ids, batch_block_hashes
                 )
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        assert isinstance(kv_connector_metadata, HF3FSConnectorMetadata)
+        self._async_manager.wait_for_preempted_requests(
+            kv_connector_metadata.preempted_req_ids
+        )
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        return self._async_manager.get_block_ids_with_load_errors()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, HF3FSConnectorMetadata):
@@ -777,6 +796,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ) -> KVConnectorMetadata:
         """Build connector metadata for scheduling step."""
         metadata = HF3FSConnectorMetadata()
+        metadata.preempted_req_ids = set(scheduler_output.preempted_req_ids or ())
 
         for request_id in scheduler_output.finished_req_ids:
             self._scheduling_states.pop(request_id, None)
@@ -861,13 +881,15 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             # Update with new tokens and blocks
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            num_current_tokens = len(state.token_ids)
-            new_token_ids = state.request.all_token_ids[
-                num_current_tokens : num_current_tokens + num_new_tokens
-            ]
+            num_tokens = cached_reqs.num_computed_tokens[i] + num_new_tokens
+            state.token_ids = state.request.all_token_ids[:num_tokens].copy()
             new_block_ids = cached_reqs.new_block_ids[i]
-
-            state.update_tokens_and_blocks(new_token_ids, new_block_ids)
+            if request_id in cached_reqs.resumed_req_ids:
+                assert new_block_ids is not None
+                state.allocated_block_ids = new_block_ids[0].copy()
+                state.num_saved_blocks = 0
+            else:
+                state.update_tokens_and_blocks([], new_block_ids)
 
             # Create save metadata
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
