@@ -139,3 +139,10 @@ We recommend three ways of implementations:
 `lmcache.inprocess.integration.vllm` package, with a fallback to
 `lmcache.integration.vllm` for older releases. Missing dependencies inside an
 installed adapter are reported rather than mistaken for an older package layout.
+
+### FlexKV speculative KV layout
+
+For hidden-state speculative decoding, FlexKV requests token-major `LBNHC` KV
+layout so target and draft layers use the strides expected by its transfer engine.
+This also applies with legacy block hashing. The external FlexKV adapter must
+allocate storage for every registered KV layer, including draft layers.

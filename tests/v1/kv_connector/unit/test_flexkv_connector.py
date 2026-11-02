@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import KVTransferConfig, SpeculativeConfig, VllmConfig
 from vllm.config.kv_transfer import KVRole
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -229,3 +229,23 @@ class TestFlexKVConnectorDelegation:
         connector, impl = connector_and_impl
         connector.wait_for_layer_load("layer_0")
         impl.wait_for_layer_load.assert_called_once_with("layer_0")
+
+
+@pytest.mark.parametrize("method", [None, "ngram", "eagle3", "mtp"])
+def test_speculative_transfer_layout_does_not_depend_on_hash_lookahead(method):
+    from vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector import (
+        FlexKVConnectorV1,
+    )
+
+    config = VllmConfig()
+    if method is not None:
+        config.speculative_config = SpeculativeConfig(
+            model="ngram",
+            num_speculative_tokens=4,
+            disable_lookahead_block_hashes=True,
+        )
+        config.speculative_config.method = method
+    assert config.num_hash_lookahead_tokens == 0
+    assert FlexKVConnectorV1.get_required_kvcache_layout(config) == (
+        "LBNHC" if method in ("eagle3", "mtp") else None
+    )
