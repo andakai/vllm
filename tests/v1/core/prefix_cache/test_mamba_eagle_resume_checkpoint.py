@@ -372,9 +372,7 @@ def test_enabling_never_reduces_reuse(
     With non-zero retention every chunk reserves an internal checkpoint, whose
     publication would pre-empt the junction's.
     """
-    eligible = num_prefill_lookahead <= 1 and not (
-        internal_checkpoints and retention_interval != 0
-    )
+    eligible = not (internal_checkpoints and retention_interval != 0)
     block_size, hash_block_size = 512, 32
 
     def sibling_hit(shared_prefix_checkpoint):

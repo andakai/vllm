@@ -315,8 +315,8 @@ class CacheConfig:
     enable_mamba_shared_prefix_checkpoint: bool = False
     """Also preserve a Mamba "align" checkpoint at an observed shared-prefix
     junction. Off by default; requires prefix caching with fine-grained hybrid
-    cache hits. Not supported with multi-module MTP re-prefill, or with internal
-    prefill checkpoints under a non-zero `prefix_cache_retention_interval`."""
+    cache hits. Not supported with internal prefill checkpoints under a non-zero
+    `prefix_cache_retention_interval`."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.

@@ -21,7 +21,6 @@ This helps when many requests share a long system prompt and then diverge. It is
 
 - prefix caching enabled
 - `--prefix-match-unit` smaller than the Mamba block size
-- the model does not use multi-module MTP
 - `--prefix-cache-retention-interval` is 0 (the default) if the Mamba backend exports internal prefill checkpoints
 
 ```bash
