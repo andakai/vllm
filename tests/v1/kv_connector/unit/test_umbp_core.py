@@ -147,7 +147,7 @@ def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
     plans = list(scheduler.build_connector_meta(output).iter_store_plans())
     if scheduled_compute and not preempted:
         assert [plan.block_hash for plan in plans] == [request.block_hashes[1]]
-        assert plans[0].lookahead_token_ids == (32,)
+        assert plans[0].token_ids == tuple(range(16, 33))
         assert blocks[1].ref_cnt == 2
     else:
         assert plans == []
@@ -1874,7 +1874,6 @@ def test_batched_store_localizes_rank_without_changing_scheduler_batch(
         block_hashes=[b"a", b"b"],
         parent_block_hashes=[None, b"a"],
         token_ids=[tuple(range(16)), tuple(range(16, 32))],
-        lookahead_token_ids=[(), ()],
         block_sizes=[16, 16],
         request_id="request",
     )

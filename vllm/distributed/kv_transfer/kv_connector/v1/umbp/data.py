@@ -548,7 +548,6 @@ class BlockTransferPlan:
     token_ids: tuple[int, ...] = ()
     block_size: int = 0
     medium: str = "CPU"
-    lookahead_token_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -598,7 +597,6 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
     block_hashes: list[bytes]
     parent_block_hashes: list[bytes | None]
     token_ids: list[tuple[int, ...]]
-    lookahead_token_ids: list[tuple[int, ...]]
     block_sizes: list[int]
     request_id: str
 
@@ -610,7 +608,6 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
             self.block_hashes,
             self.parent_block_hashes,
             self.token_ids,
-            self.lookahead_token_ids,
             self.block_sizes,
         )
         if any(len(column) != length for column in columns):
@@ -639,7 +636,6 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
             parent_block_hash=self.parent_block_hashes[index],
             token_ids=self.token_ids[index],
             block_size=self.block_sizes[index],
-            lookahead_token_ids=self.lookahead_token_ids[index],
         )
 
     def localized(self, keys: list[str]) -> BlockStoreBatch:

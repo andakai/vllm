@@ -970,7 +970,7 @@ class UMBPStoreConnectorScheduler:
         """Describe full blocks produced by a scheduled prefill."""
         request_id = getattr(request, "request_id", None) or request.req_id
         if self.codec is None:
-            return BlockStoreBatch([], [], [], [], [], [], [], [], request_id)
+            return BlockStoreBatch([], [], [], [], [], [], [], request_id)
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         # Scheduled speculative tokens are not yet verified and have no block
         # hash; a block is storable only once its hash exists.
@@ -985,7 +985,6 @@ class UMBPStoreConnectorScheduler:
         block_hashes: list[bytes] = []
         parent_block_hashes: list[bytes | None] = []
         token_ids_by_block: list[tuple[int, ...]] = []
-        lookahead_token_ids: list[tuple[int, ...]] = []
         block_sizes: list[int] = []
         block_groups = (
             block_ids_override
@@ -1042,15 +1041,13 @@ class UMBPStoreConnectorScheduler:
                     if self.enable_kv_cache_events and index > 0
                     else None
                 )
+                # Include the lookahead tokens the hash covers, as Mooncake
+                # Store does; the KV event splits them off.
                 token_ids_by_block.append(
-                    tuple(request.all_token_ids[index * group_block_size : token_end])
-                    if self.enable_kv_cache_events
-                    else ()
-                )
-                lookahead_token_ids.append(
                     tuple(
                         request.all_token_ids[
-                            token_end : token_end + self.num_hash_lookahead_tokens
+                            index * group_block_size : token_end
+                            + self.num_hash_lookahead_tokens
                         ]
                     )
                     if self.enable_kv_cache_events
@@ -1064,7 +1061,6 @@ class UMBPStoreConnectorScheduler:
             block_hashes,
             parent_block_hashes,
             token_ids_by_block,
-            lookahead_token_ids,
             block_sizes,
             request_id,
         )
@@ -1432,10 +1428,10 @@ class UMBPStoreConnectorScheduler:
                                 if plan.parent_block_hash is not None
                                 else None
                             ),
-                            token_ids=list(plan.token_ids),
+                            token_ids=list(plan.token_ids[: plan.block_size]),
                             lookahead_token_ids=(
-                                [list(plan.lookahead_token_ids)]
-                                if plan.lookahead_token_ids
+                                [list(lookahead)]
+                                if (lookahead := plan.token_ids[plan.block_size :])
                                 else None
                             ),
                             block_size=plan.block_size,
