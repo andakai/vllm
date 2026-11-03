@@ -252,6 +252,7 @@ class UMBPStoreConnectorScheduler:
         ]
         model_config = getattr(vllm_config, "model_config", None)
         speculative_config = getattr(vllm_config, "speculative_config", None)
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         use_eagle = bool(
             speculative_config is not None and speculative_config.use_eagle_block_drop()
         )
@@ -1134,7 +1135,10 @@ class UMBPStoreConnectorScheduler:
             ()
             if num_prompt_tokens is None
             else replay_boundaries(
-                num_prompt_tokens, self.block_size, use_eagle=self.use_eagle
+                num_prompt_tokens,
+                self.block_size,
+                use_eagle=self.use_eagle,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
         mask = manager_cls.reachable_block_mask(
