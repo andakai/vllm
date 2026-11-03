@@ -1195,7 +1195,16 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
-        pytest.param({"kv_connector": True}, 0, id="kv-connector"),
+        pytest.param({"kv_connector": "ExampleConnector"}, 0, id="legacy-connector"),
+        *(
+            pytest.param({"kv_connector": connector}, 1, id=connector)
+            for connector in (
+                "DecodeBenchConnector",
+                "HiSparseConnector",
+                "MoRIIOConnector",
+                "UMBPStoreConnector",
+            )
+        ),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
 )
@@ -1229,7 +1238,7 @@ def test_num_hash_lookahead_tokens(
         ),
         speculative_config=speculative_config,
         kv_transfer_config=(
-            KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both")
+            KVTransferConfig(kv_connector=overrides["kv_connector"], kv_role="kv_both")
             if overrides.get("kv_connector")
             else None
         ),

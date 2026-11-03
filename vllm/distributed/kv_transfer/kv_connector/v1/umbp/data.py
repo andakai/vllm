@@ -548,6 +548,7 @@ class BlockTransferPlan:
     token_ids: tuple[int, ...] = ()
     block_size: int = 0
     medium: str = "CPU"
+    lookahead_token_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -599,6 +600,7 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
     token_ids: list[tuple[int, ...]]
     block_sizes: list[int]
     request_id: str
+    lookahead_token_ids: list[tuple[int, ...]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         length = len(self.keys)
@@ -612,6 +614,8 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
         )
         if any(len(column) != length for column in columns):
             raise ValueError("store batch columns must have equal lengths")
+        if self.lookahead_token_ids and len(self.lookahead_token_ids) != length:
+            raise ValueError("store batch lookahead column must have equal length")
 
     def __len__(self) -> int:
         return len(self.keys)
@@ -636,6 +640,9 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
             parent_block_hash=self.parent_block_hashes[index],
             token_ids=self.token_ids[index],
             block_size=self.block_sizes[index],
+            lookahead_token_ids=(
+                self.lookahead_token_ids[index] if self.lookahead_token_ids else ()
+            ),
         )
 
     def localized(self, keys: list[str]) -> BlockStoreBatch:
@@ -663,11 +670,13 @@ class RequestTracker:
     saved_tokens: int = 0
     block_ids: tuple[list[int], ...] = ()
     load_spec: LoadSpec | None = None
+    has_scheduled_compute: bool = False
 
     def reset(self) -> None:
         self.saved_tokens = 0
         self.block_ids = ()
         self.load_spec = None
+        self.has_scheduled_compute = False
 
     def update_blocks(self, block_ids: tuple[list[int], ...]) -> None:
         if not self.block_ids:

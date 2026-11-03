@@ -136,6 +136,13 @@ examples above. An object can be evicted between lookup and load; the default
 
 With `kv_role: "kv_consumer"` the connector only restores and never stores.
 
+UMBP follows core's lookahead block hashing policy for speculative decoding.
+A block becomes reusable once its following hash tokens are known. Only
+computed KV is stored; a final hash update can make an already computed block
+eligible for saving when the request finishes. `save_decode_cache` controls
+whether these saves may extend beyond the prompt. Disabling lookahead hashing
+retains the legacy EAGLE block-drop path.
+
 ## Limitations
 
 - Pipeline parallelism is rejected.

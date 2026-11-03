@@ -19,20 +19,26 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
+from vllm import SamplingParams
+from vllm.config import VllmConfig
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -67,6 +73,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     def __init__(self, **attrs):
         self.mode = MoRIIOMode.READ
         self._mamba_group_ids: list[int] = []
+        self._has_mamba = False
         self._attn_group_ids: list[int] = [0]
         self._attn_group_is_state: list[bool] = [False]
         self._num_ssm_scratch_blocks = 0
@@ -74,7 +81,9 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
+            hash_block_size=16,
         )
+        self.vllm_config = VllmConfig()
         for k, v in attrs.items():
             setattr(self, k, v)
 
@@ -1275,8 +1284,8 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
     worker._is_mla_cache_layer = lambda _n: False
     worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
     worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
-    worker._moriio_handshake_listener = (
-        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: (
+        ready_event.set()
     )
     return worker
 
@@ -1354,13 +1363,102 @@ def test_register_kv_caches_allows_hma_divergent_block_size():
 # _truncate_mamba_request_for_prefill
 # --------------------------------------------------------------------------
 def _mk_request(prompt, max_tokens=64, params=None):
-    return SimpleNamespace(
-        kv_transfer_params={} if params is None else params,
-        num_prompt_tokens=len(prompt),
-        prompt_token_ids=list(prompt),
-        prompt_embeds=None,
-        _all_token_ids=list(prompt),
-        max_tokens=max_tokens,
+    return Request(
+        "req",
+        list(prompt),
+        SamplingParams(
+            max_tokens=max_tokens,
+            extra_args={
+                "kv_transfer_params": {} if params is None else params,
+            },
+        ),
+        None,
+    )
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("lookahead", [0, 1, 4])
+def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
+    # Hybrid WRITE only admits DSpark, so MTP runs through READ.
+    config = create_vllm_config(
+        kv_connector="MoRIIOConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "read_mode": True,
+            "host_ip": "127.0.0.1",
+            "handshake_port": 6001,
+            "notify_port": 6002,
+        },
+    )
+    if lookahead:
+        set_mtp_config(config, lookahead)
+        config.model_config.hf_config.n_predict = lookahead
+        config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+    kv_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        hash_block_size=16,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attn"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(["mamba"], _mamba_spec()),
+        ],
+    )
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(config, "engine", kv_config)
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(16, sha256, lookahead)
+    request = Request(
+        "truncated",
+        list(range(32 + lookahead)),
+        SamplingParams(
+            max_tokens=1,
+            extra_args={
+                "kv_transfer_params": {"do_remote_decode": True},
+            },
+        ),
+        None,
+        block_hasher=hasher,
+    )
+    assert len(request.block_hashes) == 2
+    scheduler.on_new_request(request)
+    # The producer drops the last prompt token so the decoder derives h(N).
+    num_prefill_tokens = 32 + lookahead - 1
+    expected = Request(
+        "expected",
+        list(range(num_prefill_tokens)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=hasher,
+    )
+    assert request.block_hashes == expected.block_hashes
+    assert len(request.block_hashes) == 1
+    scheduler.on_new_request(request)
+    assert request.num_prompt_tokens == num_prefill_tokens
+    assert request.block_hashes == expected.block_hashes
+    config.kv_transfer_config.kv_role = "kv_consumer"
+    consumer = moriio_connector.MoRIIOConnectorScheduler(config, "decode", kv_config)
+    decode_request = Request(
+        "decode",
+        list(range(32 + lookahead)),
+        SamplingParams(
+            max_tokens=1,
+            extra_args={
+                "kv_transfer_params": {"do_remote_prefill": True},
+            },
+        ),
+        None,
+        block_hasher=hasher,
+    )
+    assert consumer.get_num_new_matched_tokens(decode_request, 16) == (
+        num_prefill_tokens - 16,
+        False,
     )
 
 
