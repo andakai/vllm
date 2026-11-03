@@ -181,6 +181,7 @@ steps:
       v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2
       v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
       v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer
+      v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_shared_junction
   mirror:
     amd:
       automatic_shard: true

@@ -20,9 +20,9 @@ With prefix caching enabled, Mamba state is stored only on the Mamba block grid,
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled
-- EAGLE/MTP speculative decoding on the Mamba group
 - `--prefix-match-unit` smaller than the Mamba block size
 - the model does not use multi-module MTP
+- `--prefix-cache-retention-interval` is 0 (the default) if the Mamba backend exports internal prefill checkpoints
 
 ```bash
 vllm serve <hybrid-model> \
