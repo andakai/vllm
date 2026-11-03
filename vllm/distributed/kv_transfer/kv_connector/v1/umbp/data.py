@@ -667,13 +667,11 @@ class RequestTracker:
     saved_tokens: int = 0
     block_ids: tuple[list[int], ...] = ()
     load_spec: LoadSpec | None = None
-    has_scheduled_compute: bool = False
 
     def reset(self) -> None:
         self.saved_tokens = 0
         self.block_ids = ()
         self.load_spec = None
-        self.has_scheduled_compute = False
 
     def update_blocks(self, block_ids: tuple[list[int], ...]) -> None:
         if not self.block_ids:

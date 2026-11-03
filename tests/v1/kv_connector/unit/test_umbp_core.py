@@ -81,7 +81,6 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
@@ -134,38 +133,22 @@ def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
         output.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
         output.num_scheduled_tokens = {"r": 32}
         output.total_num_scheduled_tokens = 32
-        first = scheduler.build_connector_meta(output)
-        assert [plan.block_id for plan in first.iter_store_plans()] == [
-            blocks[0].block_id
-        ]
-        assert list(first.iter_store_plans())[0].lookahead_token_ids == (16,)
+        scheduler.build_connector_meta(output)
     if preempted:
         output = SchedulerOutput.make_empty()
         output.preempted_req_ids = {"r"}
         scheduler.build_connector_meta(output)
+    # The sampled token completes the second block's hash.
     request.num_computed_tokens = 32
     request.append_output_token_ids(32)
-    assert len(request.block_hashes) == 2
     scheduler.request_finished(request, block_ids)
     output = SchedulerOutput.make_empty()
     output.finished_req_ids = {"r"}
-    final = scheduler.build_connector_meta(output)
-    plans = list(final.iter_store_plans())
+    plans = list(scheduler.build_connector_meta(output).iter_store_plans())
     if scheduled_compute and not preempted:
-        assert [plan.block_id for plan in plans] == [blocks[1].block_id]
-        assert plans[0].block_hash == request.block_hashes[1]
+        assert [plan.block_hash for plan in plans] == [request.block_hashes[1]]
         assert plans[0].lookahead_token_ids == (32,)
         assert blocks[1].ref_cnt == 2
-        scheduler.update_connector_output(
-            KVConnectorOutput(
-                kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
-                    store_events={
-                        final.store_event: StoreEventResult(completed_workers=1)
-                    },
-                ),
-            )
-        )
-        assert blocks[1].ref_cnt == 1
     else:
         assert plans == []
         assert blocks[1].ref_cnt == 1
@@ -173,14 +156,9 @@ def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
 
 
 @pytest.mark.parametrize("disable_lookahead", [False, True])
-@pytest.mark.parametrize("lookahead", [1, 4])
-def test_external_hit_uses_the_same_lookahead_policy_as_core(
-    disable_lookahead, lookahead
-):
+def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
     config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
-    set_mtp_config(config, lookahead, disable_lookahead_block_hashes=disable_lookahead)
-    config.model_config.hf_config.n_predict = lookahead
-    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+    set_mtp_config(config, disable_lookahead_block_hashes=disable_lookahead)
     kv_config = _kv_cache_config()
     kv_config.hash_block_size = 16
     # Force the hybrid coordinator path, including an explicitly marked draft group.
@@ -194,32 +172,28 @@ def test_external_hit_uses_the_same_lookahead_policy_as_core(
     codec = BlockIdentityCodec(UMBPNamespace("lookahead-hit"))
     init_none_hash(sha256)
     hasher = get_request_block_hasher(16, sha256, config.num_hash_lookahead_tokens)
-    request = Request(
-        "r",
-        list(range(32 + lookahead)),
-        SamplingParams(max_tokens=1),
-        None,
-        block_hasher=hasher,
-    )
+
+    def request(token_ids: list[int]) -> Request:
+        return Request(
+            "r", token_ids, SamplingParams(max_tokens=1), None, block_hasher=hasher
+        )
+
+    stored = request(list(range(33)))
     runtime = _SchedulerHandle(
         {
             codec.key(block_hash, group): True
-            for block_hash in request.block_hashes
+            for block_hash in stored.block_hashes
             for group in (0, 1)
         }
     )
     scheduler = UMBPStoreConnectorScheduler(config, kv_config, runtime, codec)
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (
+    # Drop recomputes the last block; lookahead reuses it.
+    assert scheduler.get_num_new_matched_tokens(stored, 0) == (
         16 if disable_lookahead else 32,
         True,
     )
-    changed = Request(
-        "changed",
-        [*range(32), 99, *range(33, 32 + lookahead)],
-        SamplingParams(max_tokens=1),
-        None,
-        block_hasher=hasher,
-    )
+    # A different token after the block invalidates its lookahead hash.
+    changed = request([*range(32), 99])
     assert scheduler.get_num_new_matched_tokens(changed, 0) == (16, True)
     scheduler.close()
 

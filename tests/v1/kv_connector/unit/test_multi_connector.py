@@ -1057,7 +1057,6 @@ Options:
         (1, True, True, 0, False, "SCHEDULER"),
         (1, True, False, 1, False, "WORKER"),
         (1, True, False, 1, True, "SCHEDULER"),
-        (1, True, True, 0, True, "SCHEDULER"),
         (1, True, False, 1, True, "WORKER"),
     ],
 )

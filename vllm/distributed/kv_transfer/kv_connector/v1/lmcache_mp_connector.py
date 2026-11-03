@@ -188,8 +188,7 @@ class LMCacheMPRequestTracker:
 
     request_id: str
 
-    # Read-only list to track the token ids. LMCache keys come from the token
-    # ids, so the stored range does not depend on core block hashes.
+    # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
 
     # Block ids and hashes will be updated at update_states_after_alloc and

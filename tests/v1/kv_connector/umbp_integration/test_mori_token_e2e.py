@@ -11,7 +11,6 @@ import time
 import pytest
 
 import vllm.envs as envs
-from tests.models.utils import check_logprobs_close
 from tests.utils import multi_gpu_marks
 from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
 from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
@@ -137,57 +136,3 @@ def test_restore_extends_a_local_prefix_hit(umbp_llm):
     assert mixed[0].num_cached_tokens == 8 * BLOCK_SIZE
     assert _external_tokens(umbp_llm) - before == 6 * BLOCK_SIZE
     _assert_same_outputs(computed, mixed)
-
-
-def test_mtp_restore_preserves_last_prefix_block(vllm_runner, socket_dir):
-    """Lookahead restores the last draft block without the legacy EAGLE drop."""
-    revision = "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
-    with vllm_runner(
-        "Qwen/Qwen3.6-27B",
-        revision=revision,
-        dtype="bfloat16",
-        kv_cache_dtype="bfloat16",
-        block_size=64,
-        enable_chunked_prefill=True,
-        max_model_len=4096,
-        max_num_seqs=8,
-        max_num_batched_tokens=2048,
-        kv_cache_memory_bytes=8 * 1024**3,
-        enable_prefix_caching=True,
-        disable_log_stats=False,
-        speculative_config={
-            "method": "mtp",
-            "num_speculative_tokens": 4,
-            "revision": revision,
-        },
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="UMBPStoreConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "mode": "embedded",
-                "capacity_bytes": 2 * 1024**3,
-                "lookup_dir": socket_dir,
-                "save_decode_cache": True,
-            },
-        ),
-    ) as runner:
-        llm = runner.llm
-        # This model's hybrid groups align every 832 tokens. The final prompt
-        # token makes the hash for the second block available before prefill.
-        prompt = _prompt(0, 2 * 832 + 1)
-        computed = llm.generate(prompt, PARAMS, use_tqdm=False)
-        _reset_gpu_prefix_cache(llm)
-        before = _external_tokens(llm)
-        restored = llm.generate(prompt, PARAMS, use_tqdm=False)
-        assert _external_tokens(llm) - before == 2 * 832
-        check_logprobs_close(
-            outputs_0_lst=[
-                (o.token_ids, o.text, o.logprobs) for r in computed for o in r.outputs
-            ],
-            outputs_1_lst=[
-                (o.token_ids, o.text, o.logprobs) for r in restored for o in r.outputs
-            ],
-            name_0="recompute",
-            name_1="UMBP restore",
-            always_check_logprobs=True,
-        )

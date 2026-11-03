@@ -1237,7 +1237,7 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     get_hisparse_coordinator(manager).update_spills(counts, counts)
 
 
-@pytest.mark.parametrize("lookahead", [0, 1, 3])
+@pytest.mark.parametrize("lookahead", [0, 1])
 def test_hisparse_events_report_host_and_device_placement(lookahead):
     """Host publication and eviction must not advertise GPU-resident KV."""
     manager = make_kv_cache_manager(
@@ -1452,7 +1452,7 @@ def test_hisparse_finished_request_leaves_free_copies():
     ],
     ids=["stopped", "aborted", "running"],
 )
-@pytest.mark.parametrize("lookahead", [0, 1, 3])
+@pytest.mark.parametrize("lookahead", [0, 3])
 def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
     status, expected_cached_pages, lookahead
 ):

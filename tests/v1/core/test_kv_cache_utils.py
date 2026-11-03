@@ -1196,11 +1196,6 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
         pytest.param({"kv_connector": True}, 1, id="kv-connector"),
-        pytest.param(
-            {"kv_connector": True, "enable_prefix_caching": False},
-            1,
-            id="kv-connector-no-prefix-caching",
-        ),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
 )

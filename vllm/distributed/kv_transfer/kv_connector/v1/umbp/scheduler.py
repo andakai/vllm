@@ -298,7 +298,6 @@ class UMBPStoreConnectorScheduler:
                 hash_block_size=self.hash_block_size,
                 # As core's scheduler builds its coordinator.
                 num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
-                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
                 allow_partial_hash_hits=self.enable_partial_hash_hits,
             )
             if lookup_groups
@@ -617,7 +616,6 @@ class UMBPStoreConnectorScheduler:
         tracker = self._tracker_for_request(request.request_id)
         # Core passes the request's whole table on every admission. A request
         # whose load failed is recomputed into newly allocated blocks.
-        tracker.has_scheduled_compute = False
         tracker.replace_blocks(tuple(list(group) for group in block_groups))
         if num_external_tokens <= 0:
             self._pending_loads.pop(request.request_id, None)
@@ -662,7 +660,6 @@ class UMBPStoreConnectorScheduler:
                 meta.load_requests[request.req_id] = load_plans
             else:
                 tracker = self._tracker_for_request(request.req_id)
-                tracker.has_scheduled_compute = True
                 total_tokens = (
                     request.num_computed_tokens
                     + scheduler_output.num_scheduled_tokens[request.req_id]
@@ -706,7 +703,6 @@ class UMBPStoreConnectorScheduler:
                 cached_request = self._requests.get(request_id)
                 cached_tracker = self._request_trackers.get(request_id)
                 if cached_request is not None and cached_tracker is not None:
-                    cached_tracker.has_scheduled_compute = True
                     request_index = cached_reqs.req_ids.index(request_id)
                     num_computed_tokens = cached_reqs.num_computed_tokens[request_index]
                     # num_tokens counts sampled tokens, so a decode step is still
@@ -1197,13 +1193,14 @@ class UMBPStoreConnectorScheduler:
         """Pin completed KV whose hash became available with the last sample."""
         pool = self._gpu_block_pool
         tracker = self._request_trackers.get(request.request_id)
+        # Only a request that computed KV has saved any; one still waiting for
+        # its load has not.
         if (
             not self.store_enabled
             or not self.num_hash_lookahead_tokens
-            or self.codec is None
             or pool is None
             or tracker is None
-            or not tracker.has_scheduled_compute
+            or not tracker.saved_tokens
         ):
             return
         completed_tokens = request.num_computed_tokens - (
@@ -1212,11 +1209,9 @@ class UMBPStoreConnectorScheduler:
         save_limit = (
             request.num_tokens if self.save_decode_cache else request.num_prompt_tokens
         )
-        pending = self._pending_finished_stores.get(request.request_id, [])
         reserved_keys = {
             key for event in self._store_events.values() for key in event.iter_keys()
         }
-        reserved_keys.update(plan.key for plan in pending)
         plans = self._store_plans(
             request,
             tracker,
@@ -1229,15 +1224,11 @@ class UMBPStoreConnectorScheduler:
         )
         if not plans:
             return
-        pinned = {plan.block_id for plan in pending}
+        # Full blocks end before the partial tail, so their pins never overlap.
         pool.touch(
-            [
-                pool.blocks[block_id]
-                for block_id in dict.fromkeys(plans.block_ids)
-                if block_id not in pinned
-            ]
+            [pool.blocks[block_id] for block_id in dict.fromkeys(plans.block_ids)]
         )
-        self._pending_finished_stores[request.request_id] = [*pending, *plans]
+        self._pending_finished_stores.setdefault(request.request_id, []).extend(plans)
 
     def register_finished_partial_tail(
         self,

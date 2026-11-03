@@ -681,8 +681,7 @@ class VllmConfig:
             or speculative_config.disable_lookahead_block_hashes
         ):
             return 0
-        # A KV connector may key its cache with the request's block hashes even
-        # when core prefix caching is disabled.
+        # A KV connector uses block hashes even without core prefix caching.
         if (
             self.kv_transfer_config is None
             and not self.cache_config.enable_prefix_caching
