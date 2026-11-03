@@ -869,9 +869,6 @@ class UMBPStoreConnectorScheduler:
                             else None
                         ),
                         block_size=self.group_block_sizes[group_id],
-                        lookahead_token_ids=self._lookahead_token_ids(
-                            request, boundary_tokens
-                        ),
                     )
                 )
             logger.debug(
@@ -951,13 +948,6 @@ class UMBPStoreConnectorScheduler:
                 destinations.append(group_block_ids[block_index])
                 groups.append(group_id)
         return BlockLoadBatch(keys, destinations, groups, request.request_id)
-
-    def _lookahead_token_ids(self, request: Any, token_end: int) -> tuple[int, ...]:
-        """Tokens after a block that its hash covers, for KV events."""
-        if not self.enable_kv_cache_events:
-            return ()
-        end = token_end + self.num_hash_lookahead_tokens
-        return tuple(request.all_token_ids[token_end:end])
 
     def _object_hash_at_token_end(
         self, hashes: Sequence[bytes], token_end: int
@@ -1058,7 +1048,13 @@ class UMBPStoreConnectorScheduler:
                     else ()
                 )
                 lookahead_token_ids.append(
-                    self._lookahead_token_ids(request, token_end)
+                    tuple(
+                        request.all_token_ids[
+                            token_end : token_end + self.num_hash_lookahead_tokens
+                        ]
+                    )
+                    if self.enable_kv_cache_events
+                    else ()
                 )
                 block_sizes.append(group_block_size)
         return BlockStoreBatch(
@@ -1298,7 +1294,6 @@ class UMBPStoreConnectorScheduler:
                     key=self.codec.key(request.block_hashes[hash_index], group_id),
                     block_hash=request.block_hashes[hash_index],
                     block_size=group_block_size,
-                    lookahead_token_ids=self._lookahead_token_ids(request, boundary),
                 )
             )
         # A Mamba page is a state snapshot, not a token-addressable byte array.
