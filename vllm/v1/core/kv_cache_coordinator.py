@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
 from vllm.utils.math_utils import cdiv, round_down
@@ -541,6 +541,52 @@ class SpecGroup(NamedTuple):
     manager_cls: type[SingleTypeKVCacheManager]
 
 
+def converge_cache_hit(
+    attention_groups: Sequence[SpecGroup],
+    num_groups: int,
+    max_length: int,
+    find_hit: Callable[[SpecGroup, int], tuple[Sequence[list[KVCacheBlock]], int]],
+) -> tuple[list[list[KVCacheBlock] | None], int, int]:
+    """Find the longest hit that every spec group accepts.
+
+    Each group either accepts the candidate length or reduces it; a reduction
+    restarts the checks over all groups. This converges because the length only
+    decreases. Full attention is downward-closed, so it is looked up once and
+    callers trim its blocks to the converged length.
+
+    Returns:
+        The hit blocks of each group, the converged hit length, and the longest
+        hit any single group reported.
+
+    """
+    hit_length = max_length
+    longest_hit_length = 0
+    hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+    # Simple hybrid (1 full attn + 1 other): one iteration suffices.
+    # Full attn is always first if it exists.
+    is_simple_hybrid = len(attention_groups) == 2 and isinstance(
+        attention_groups[0].spec, FullAttentionSpec
+    )
+    while True:
+        curr_hit_length = hit_length
+        for group in attention_groups:
+            if (
+                isinstance(group.spec, FullAttentionSpec)
+                and hit_blocks_by_group[group.group_ids[0]] is not None
+            ):
+                continue
+            hit_blocks, curr_hit_length = find_hit(group, curr_hit_length)
+            for group_id, blocks in zip(group.group_ids, hit_blocks):
+                hit_blocks_by_group[group_id] = blocks
+            longest_hit_length = max(longest_hit_length, curr_hit_length)
+        if curr_hit_length >= hit_length:
+            break
+        hit_length = curr_hit_length
+        if is_simple_hybrid:
+            break
+    return hit_blocks_by_group, hit_length, longest_hit_length
+
+
 class HybridKVCacheCoordinator(KVCacheCoordinator):
     """KV cache coordinator for hybrid models with multiple KV cache types, and
     thus multiple kv cache groups.
@@ -729,54 +775,28 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                   sparse-retention group has not cached yet (0 unless hybrid).
 
         """
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
-        hit_length = max_cache_hit_length
-        longest_hit_length = 0
-        hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
-        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
-        # Full attn is always first if it exists.
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0].spec, FullAttentionSpec
+        def find_hit(
+            group: SpecGroup, max_length: int
+        ) -> tuple[Sequence[list[KVCacheBlock]], int]:
+            manager = self.single_type_managers[group.group_ids[0]]
+            return group.manager_cls.find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=max_length,
+                kv_cache_group_ids=group.group_ids,
+                block_pool=manager.block_pool,
+                kv_cache_spec=group.spec,
+                alignment_tokens=self._cache_hit_alignment_tokens,
+                dcp_world_size=manager.dcp_world_size,
+                pcp_world_size=manager.pcp_world_size,
+            )
+
+        hit_blocks_by_group, hit_length, longest_hit_length = converge_cache_hit(
+            self.attention_groups,
+            len(self.kv_cache_config.kv_cache_groups),
+            max_cache_hit_length,
+            find_hit,
         )
-
-        while True:
-            curr_hit_length = hit_length
-
-            for spec, group_ids, manager_cls in self.attention_groups:
-                first_group_id = group_ids[0]
-                cached_blocks = hit_blocks_by_group[first_group_id]
-                if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
-                    # Full attention is downward-closed: we only need to look
-                    # up cached blocks once; on subsequent iterations just trim
-                    # to the (reduced) current hit length.
-                    continue
-
-                hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
-                    block_hashes=block_hashes,
-                    max_length=curr_hit_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=self.single_type_managers[first_group_id].block_pool,
-                    kv_cache_spec=spec,
-                    alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.single_type_managers[
-                        first_group_id
-                    ].dcp_world_size,
-                    pcp_world_size=self.single_type_managers[
-                        first_group_id
-                    ].pcp_world_size,
-                )
-                curr_hit_length = _new_hit_length
-                for group_id, blocks in zip(group_ids, hit_blocks):
-                    hit_blocks_by_group[group_id] = blocks
-
-                longest_hit_length = max(longest_hit_length, curr_hit_length)
-
-            if curr_hit_length >= hit_length:
-                break
-            hit_length = curr_hit_length
-            if is_simple_hybrid:
-                break
 
         # Truncate every full-attention group (target and draft) blocks
         # to final hit_length.

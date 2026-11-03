@@ -4,17 +4,15 @@
 
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, cast
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import SpecGroup, converge_cache_hit
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     resolve_dcp_kv_cache_spec,
-)
-from vllm.v1.core.single_type_kv_cache_manager import (
-    SingleTypeKVCacheManager,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -30,12 +28,6 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-
-class StoreSpecGroup(NamedTuple):
-    spec: KVCacheSpec
-    group_ids: list[int]
-    manager_cls: type[SingleTypeKVCacheManager]
 
 
 class ExternalCachedBlockPool:
@@ -165,7 +157,7 @@ class MooncakeStoreCoordinator:
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         """Group compatible specs using their registered cache managers."""
-        attention_groups: list[StoreSpecGroup] = []
+        attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
             if not g.kv_cache_spec.prefix_cacheable:
                 continue
@@ -180,7 +172,7 @@ class MooncakeStoreCoordinator:
                     group.group_ids.append(i)
                     break
             else:
-                attention_groups.append(StoreSpecGroup(spec, [i], manager_cls))
+                attention_groups.append(SpecGroup(spec, [i], manager_cls))
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
         self.attention_groups = attention_groups
@@ -330,55 +322,22 @@ class MooncakeStoreCoordinator:
             if self.enable_partial_hash_hits
             else self.lcm_block_size
         )
-        if len(self.attention_groups) == 1:
-            spec, group_ids, manager_cls = self.attention_groups[0]
-            hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
+
+        def find_hit(
+            group: SpecGroup, max_length: int
+        ) -> tuple[Sequence[list[KVCacheBlock]], int]:
+            return group.manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,  # type: ignore[arg-type]
                 max_length=max_length,
-                kv_cache_group_ids=group_ids,
+                kv_cache_group_ids=group.group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
-                kv_cache_spec=spec,
+                kv_cache_spec=group.spec,
                 alignment_tokens=alignment_tokens,
             )
-            num_groups = len(self.kv_cache_groups)
-            blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
-            for gid, blks in zip(group_ids, hit_blocks, strict=True):
-                blocks_by_group[gid] = blks
-            return tuple(blocks_by_group), hit_length
 
-        num_groups = len(self.kv_cache_groups)
-        hit_length = max_length
-        hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
-
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0].spec, FullAttentionSpec
+        hit_blocks_by_group, hit_length, _ = converge_cache_hit(
+            self.attention_groups, len(self.kv_cache_groups), max_length, find_hit
         )
-
-        while True:
-            curr_hit_length = hit_length
-
-            for spec, group_ids, manager_cls in self.attention_groups:
-                first_group_id = group_ids[0]
-                cached = hit_blocks_by_group[first_group_id]
-                if isinstance(spec, FullAttentionSpec) and cached is not None:
-                    continue
-                hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
-                    block_hashes=block_hashes,  # type: ignore[arg-type]
-                    max_length=curr_hit_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=cast(BlockPool, cached_block_pool),
-                    kv_cache_spec=spec,
-                    alignment_tokens=alignment_tokens,
-                )
-                curr_hit_length = _new_hit_length
-                for gid, blocks in zip(group_ids, hit_blocks, strict=True):
-                    hit_blocks_by_group[gid] = blocks
-
-            if curr_hit_length >= hit_length:
-                break
-            hit_length = curr_hit_length
-            if is_simple_hybrid:
-                break
 
         # Truncate full-attention hit_blocks to final converged length;
         # other specs already trim themselves inside their hit logic. cdiv keeps
