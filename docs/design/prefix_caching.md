@@ -99,22 +99,6 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
-## Speculative decoding and lookahead hashes
-
-With EAGLE, EAGLE3 or MTP, the drafter's KV at a block's last position depends on
-the tokens that follow the block. Each block hash therefore also covers the next
-`num_hash_lookahead_tokens` tokens, so a hit proves those tokens match. A block's
-hash becomes available only once those tokens exist.
-
-KV connectors receive the same hashes. A connector that keys its cache with the
-request's block hashes gets the same guarantee on external hits. A connector
-that derives its own keys from token IDs does not verify the following tokens;
-its external hits can reuse a stale draft KV entry at the boundary, which only
-affects the acceptance rate. ExampleConnector, HF3FS, FlexKV and LMCache derive
-their own keys. Setting `disable_lookahead_block_hashes` in the speculative
-config restores the legacy behavior, in which core recomputes the last matched
-block.
-
 ## Data Structure
 
 The prefix caching in vLLM v1 is implemented in the KV cache manager. The basic building block is the “Block” data class (simplified):

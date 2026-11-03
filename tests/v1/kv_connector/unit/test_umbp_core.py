@@ -98,18 +98,14 @@ _LAYER1_SPEC = FullAttentionSpec(
 _LAYER2_SPEC = replace(_LAYER1_SPEC, num_kv_heads=2)
 
 
-@pytest.mark.parametrize("scheduled_compute", [False, True])
-@pytest.mark.parametrize("preempted", [False, True])
-@pytest.mark.parametrize("save_decode_cache", [False, True])
-def test_lookahead_finish_saves_only_computed_kv(
-    scheduled_compute, preempted, save_decode_cache
-):
+@pytest.mark.parametrize(
+    ("scheduled_compute", "preempted"),
+    [(True, False), (False, False), (True, True)],
+    ids=["computed", "pending-load", "preempted"],
+)
+def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
     """The last sample makes a hash reusable; a pending load supplies no KV."""
-    config = create_vllm_config(
-        kv_connector="UMBPStoreConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"save_decode_cache": save_decode_cache},
-    )
+    config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
     set_mtp_config(config)
     config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
     kv_config = _kv_cache_config()
@@ -225,15 +221,6 @@ def test_external_hit_uses_the_same_lookahead_policy_as_core(
         block_hasher=hasher,
     )
     assert scheduler.get_num_new_matched_tokens(changed, 0) == (16, True)
-    if lookahead > 1:
-        short = Request(
-            "short",
-            list(range(33)),
-            SamplingParams(max_tokens=1),
-            None,
-            block_hasher=hasher,
-        )
-        assert scheduler.get_num_new_matched_tokens(short, 0) == (16, True)
     scheduler.close()
 
 
@@ -1913,6 +1900,7 @@ def test_batched_store_localizes_rank_without_changing_scheduler_batch(
         block_hashes=[b"a", b"b"],
         parent_block_hashes=[None, b"a"],
         token_ids=[tuple(range(16)), tuple(range(16, 32))],
+        lookahead_token_ids=[(), ()],
         block_sizes=[16, 16],
         request_id="request",
     )

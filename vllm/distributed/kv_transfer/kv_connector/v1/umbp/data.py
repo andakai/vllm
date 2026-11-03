@@ -598,9 +598,9 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
     block_hashes: list[bytes]
     parent_block_hashes: list[bytes | None]
     token_ids: list[tuple[int, ...]]
+    lookahead_token_ids: list[tuple[int, ...]]
     block_sizes: list[int]
     request_id: str
-    lookahead_token_ids: list[tuple[int, ...]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         length = len(self.keys)
@@ -610,12 +610,11 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
             self.block_hashes,
             self.parent_block_hashes,
             self.token_ids,
+            self.lookahead_token_ids,
             self.block_sizes,
         )
         if any(len(column) != length for column in columns):
             raise ValueError("store batch columns must have equal lengths")
-        if self.lookahead_token_ids and len(self.lookahead_token_ids) != length:
-            raise ValueError("store batch lookahead column must have equal length")
 
     def __len__(self) -> int:
         return len(self.keys)
@@ -640,9 +639,7 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
             parent_block_hash=self.parent_block_hashes[index],
             token_ids=self.token_ids[index],
             block_size=self.block_sizes[index],
-            lookahead_token_ids=(
-                self.lookahead_token_ids[index] if self.lookahead_token_ids else ()
-            ),
+            lookahead_token_ids=self.lookahead_token_ids[index],
         )
 
     def localized(self, keys: list[str]) -> BlockStoreBatch:

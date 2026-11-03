@@ -873,15 +873,8 @@ class UMBPStoreConnectorScheduler:
                             else None
                         ),
                         block_size=self.group_block_sizes[group_id],
-                        lookahead_token_ids=(
-                            tuple(
-                                request.all_token_ids[
-                                    boundary_tokens : boundary_tokens
-                                    + self.num_hash_lookahead_tokens
-                                ]
-                            )
-                            if self.enable_kv_cache_events
-                            else ()
+                        lookahead_token_ids=self._lookahead_token_ids(
+                            request, boundary_tokens
                         ),
                     )
                 )
@@ -963,6 +956,13 @@ class UMBPStoreConnectorScheduler:
                 groups.append(group_id)
         return BlockLoadBatch(keys, destinations, groups, request.request_id)
 
+    def _lookahead_token_ids(self, request: Any, token_end: int) -> tuple[int, ...]:
+        """Tokens after a block that its hash covers, for KV events."""
+        if not self.enable_kv_cache_events:
+            return ()
+        end = token_end + self.num_hash_lookahead_tokens
+        return tuple(request.all_token_ids[token_end:end])
+
     def _object_hash_at_token_end(
         self, hashes: Sequence[bytes], token_end: int
     ) -> bytes:
@@ -984,7 +984,7 @@ class UMBPStoreConnectorScheduler:
         """Describe full blocks produced by a scheduled prefill."""
         request_id = getattr(request, "request_id", None) or request.req_id
         if self.codec is None:
-            return BlockStoreBatch([], [], [], [], [], [], [], request_id)
+            return BlockStoreBatch([], [], [], [], [], [], [], [], request_id)
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         # Scheduled speculative tokens are not yet verified and have no block
         # hash; a block is storable only once its hash exists.
@@ -1061,15 +1061,10 @@ class UMBPStoreConnectorScheduler:
                     if self.enable_kv_cache_events
                     else ()
                 )
+                lookahead_token_ids.append(
+                    self._lookahead_token_ids(request, token_end)
+                )
                 block_sizes.append(group_block_size)
-                if self.enable_kv_cache_events and self.num_hash_lookahead_tokens:
-                    lookahead_token_ids.append(
-                        tuple(
-                            request.all_token_ids[
-                                token_end : token_end + self.num_hash_lookahead_tokens
-                            ]
-                        )
-                    )
         return BlockStoreBatch(
             keys,
             source_block_ids,
@@ -1077,9 +1072,9 @@ class UMBPStoreConnectorScheduler:
             block_hashes,
             parent_block_hashes,
             token_ids_by_block,
+            lookahead_token_ids,
             block_sizes,
             request_id,
-            lookahead_token_ids=lookahead_token_ids,
         )
 
     def _restored_store_blocks(
@@ -1312,15 +1307,7 @@ class UMBPStoreConnectorScheduler:
                     key=self.codec.key(request.block_hashes[hash_index], group_id),
                     block_hash=request.block_hashes[hash_index],
                     block_size=group_block_size,
-                    lookahead_token_ids=(
-                        tuple(
-                            request.all_token_ids[
-                                boundary : boundary + self.num_hash_lookahead_tokens
-                            ]
-                        )
-                        if self.enable_kv_cache_events
-                        else ()
-                    ),
+                    lookahead_token_ids=self._lookahead_token_ids(request, boundary),
                 )
             )
         # A Mamba page is a state snapshot, not a token-addressable byte array.
