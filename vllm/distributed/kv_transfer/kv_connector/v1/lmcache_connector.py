@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -24,28 +23,12 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.config import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-
-def _get_lmcache_adapter_class() -> type[Any]:
-    module_path = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
-    try:
-        return import_module(module_path).LMCacheConnectorV1Impl
-    except ModuleNotFoundError as error:
-        # Only fall back for packages predating the in-process module move.
-        if error.name is None or not (
-            module_path == error.name or module_path.startswith(error.name + ".")
-        ):
-            raise
-    return import_module(
-        "lmcache.integration.vllm.vllm_v1_adapter"
-    ).LMCacheConnectorV1Impl
 
 
 class LMCacheKVEvents(KVConnectorKVEvents):
@@ -84,18 +67,6 @@ class LMCacheKVEvents(KVConnectorKVEvents):
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
     @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        if kv_transfer_config.get_from_extra_config("use_native", False):
-            return False
-        try:
-            adapter_cls = _get_lmcache_adapter_class()
-        except ImportError:
-            return False
-        return getattr(adapter_cls, "LOOKAHEAD_HASHES_VERSION", 0) == 1
-
-    @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """LMCache requires PIECEWISE CUDA graph mode when layerwise
         operations are enabled. The wait_for_layer_load and save_kv_layer
@@ -122,20 +93,19 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             # lazy import
             from vllm.distributed.kv_transfer.kv_connector.v1 import lmcache_integration
 
-            adapter_cls = lmcache_integration.vllm_v1_adapter.LMCacheConnectorV1Impl
+            _adapter = lmcache_integration.vllm_v1_adapter
+
+            cls = _adapter.LMCacheConnectorV1Impl
         else:
             logger.info("Initializing latest dev LMCache connector")
-            adapter_cls = _get_lmcache_adapter_class()
-
-        supports_lookahead = (
-            not use_native and getattr(adapter_cls, "LOOKAHEAD_HASHES_VERSION", 0) == 1
-        )
-        if vllm_config.num_hash_lookahead_tokens and not supports_lookahead:
-            raise ValueError(
-                "Lookahead hashes require a compatible external LMCache adapter"
+            # lazy import
+            from lmcache.integration.vllm.vllm_v1_adapter import (
+                LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
             )
-        kwargs = {"kv_cache_config": kv_cache_config} if supports_lookahead else {}
-        self._lmcache_engine = adapter_cls(vllm_config, role, self, **kwargs)
+
+            cls = LMCacheConnectorLatestImpl
+
+        self._lmcache_engine = cls(vllm_config, role, self)
 
         self._kv_cache_events: LMCacheKVEvents | None = None
 
@@ -281,7 +251,6 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 block_size=e.block_size,
                 medium=e.medium,
                 lora_name=getattr(e, "lora_name", None),
-                lookahead_token_ids=getattr(e, "lookahead_token_ids", None),
             )
             for e in events
         ]

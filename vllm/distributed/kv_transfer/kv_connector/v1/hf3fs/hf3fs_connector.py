@@ -63,7 +63,6 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHashListWithBlockSize
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.utils import create_metric_per_engine
@@ -114,8 +113,7 @@ class AsyncOperationManager:
 
         # Operation tracking
         self._save_futures: dict[str, list[Future]] = {}
-        self._load_futures: dict[str, list[tuple[Future, list[int]]]] = {}
-        self._invalid_block_ids: set[int] = set()
+        self._load_futures: dict[str, Future] = {}
         self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
@@ -185,21 +183,8 @@ class AsyncOperationManager:
         future: Future[Any] = Future()
         task = (request_id, block_ids, block_hashes, future)
         self._load_queue.put(task)
-        self._load_futures.setdefault(request_id, []).append((future, block_ids.copy()))
+        self._load_futures[request_id] = future
         return future
-
-    def wait_for_preempted_requests(self, request_ids: set[str]) -> None:
-        """Finish transfers before a preempted request's blocks are overwritten."""
-        for request_id in request_ids:
-            for future in self._save_futures.pop(request_id, []):
-                future.result()
-            for future, _ in self._load_futures.pop(request_id, []):
-                future.result()
-
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        """Return failed destination blocks since the last completion poll."""
-        invalid, self._invalid_block_ids = self._invalid_block_ids, set()
-        return invalid
 
     def get_finished_operations(
         self, finished_req_ids: set[str]
@@ -220,34 +205,38 @@ class AsyncOperationManager:
         """Check for completed save operations."""
         completed = set()
 
-        # Aborted loads also own destination blocks until the I/O has stopped.
-        for request_id in self._pending_finished_requests | finished_req_ids:
-            if self._all_saves_done(request_id) and all(
-                future.done() for future, _ in self._load_futures.get(request_id, [])
-            ):
+        # Check pending finished requests first
+        for request_id in list(self._pending_finished_requests):
+            if request_id in self._save_futures and self._all_saves_done(request_id):
                 completed.add(request_id)
-                self._save_futures.pop(request_id, None)
-                self._pending_finished_requests.discard(request_id)
+                self._save_futures.pop(request_id)
+                self._pending_finished_requests.remove(request_id)
+
+        # Process newly finished requests
+        for request_id in finished_req_ids:
+            if request_id in self._save_futures:
+                if self._all_saves_done(request_id):
+                    completed.add(request_id)
+                    self._save_futures.pop(request_id)
+                else:
+                    self._pending_finished_requests.add(request_id)
             else:
-                self._pending_finished_requests.add(request_id)
+                completed.add(request_id)
 
         return completed
 
     def _check_completed_loads(self) -> set[str]:
         """Check for completed load operations."""
         completed = set()
-        for request_id, batches in list(self._load_futures.items()):
-            if all(future.done() for future, _ in batches):
-                for future, block_ids in batches:
-                    if not future.result():
-                        self._invalid_block_ids.update(block_ids)
+        for request_id in list(self._load_futures):
+            if self._load_futures[request_id].done():
                 completed.add(request_id)
                 self._load_futures.pop(request_id)
         return completed
 
     def _all_saves_done(self, request_id: str) -> bool:
         """Check if all save operations for a request are completed."""
-        return all(future.done() for future in self._save_futures.get(request_id, []))
+        return all(future.done() for future in self._save_futures[request_id])
 
     def _save_worker(self) -> None:
         """Background worker for handling save operations."""
@@ -493,32 +482,6 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._use_mla = vllm_config.model_config.use_mla
         self._model_config = vllm_config.model_config
-        self._num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
-        self._hash_block_size = kv_cache_config.hash_block_size
-        if self._num_hash_lookahead_tokens:
-            self._block_size = kv_cache_config.kv_cache_groups[
-                0
-            ].kv_cache_spec.block_size
-        if self._num_hash_lookahead_tokens and role == KVConnectorRole.SCHEDULER:
-            assert self._hash_block_size is not None
-            assert self._block_size % self._hash_block_size == 0
-            spec = vllm_config.speculative_config
-            assert spec is not None
-            self._hash_namespace = hashlib.sha256(
-                repr(
-                    (
-                        "hf3fs-lookahead-v1",
-                        self._model_config.compute_hash(),
-                        spec.method,
-                        spec.compute_hash(),
-                        vllm_config.parallel_config.compute_hash(),
-                        vllm_config.cache_config.cache_dtype,
-                        self._block_size,
-                        self._hash_block_size,
-                        self._num_hash_lookahead_tokens,
-                    )
-                ).encode()
-            ).hexdigest()
 
         logger.info("Using MLA: %s", self._use_mla)
 
@@ -659,11 +622,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 continue
 
             skip_blocks = request.save_block_op.skip_leading_blocks
-            block_hashes = (
-                request.block_hashes[skip_blocks:]
-                if request.block_hashes is not None
-                else self._generate_block_hashes(request.token_ids, skip_blocks)
-            )
+            block_hashes = self._generate_block_hashes(request.token_ids, skip_blocks)
             block_ids = request.block_ids[skip_blocks : skip_blocks + len(block_hashes)]
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
@@ -672,15 +631,6 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 self._async_manager.submit_save_operation(
                     request.request_id, batch_block_ids, batch_block_hashes
                 )
-
-    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        assert isinstance(kv_connector_metadata, HF3FSConnectorMetadata)
-        self._async_manager.wait_for_preempted_requests(
-            kv_connector_metadata.preempted_req_ids
-        )
-
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        return self._async_manager.get_block_ids_with_load_errors()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         metadata = self._get_connector_metadata()
@@ -694,15 +644,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             load_op = request.load_block_op
             block_ids = request.block_ids[: load_op.num_blocks_to_load]
-            block_hashes = (
-                request.block_hashes[
-                    load_op.num_computed_blocks : load_op.num_computed_blocks
-                    + len(block_ids)
-                ]
-                if request.block_hashes is not None
-                else self._generate_block_hashes(
-                    request.token_ids, load_op.num_computed_blocks, len(block_ids)
-                )
+            block_hashes = self._generate_block_hashes(
+                request.token_ids, load_op.num_computed_blocks, len(block_ids)
             )
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
@@ -762,12 +705,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
                 return 0, False
 
-            block_hashes = self._get_request_block_hashes(request)
-            if block_hashes is None:
-                token_ids_to_check = request.prompt_token_ids[:num_tokens_to_check]
-                block_hashes = self._generate_block_hashes(token_ids_to_check, 0)
-            else:
-                block_hashes = block_hashes[: num_tokens_to_check // self._block_size]
+            token_ids_to_check = request.prompt_token_ids[:num_tokens_to_check]
+            block_hashes = self._generate_block_hashes(token_ids_to_check, 0)
 
             # Check existence
             exists_results = self._metadata_client.batch_key_exists(block_hashes)
@@ -838,7 +777,6 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ) -> KVConnectorMetadata:
         """Build connector metadata for scheduling step."""
         metadata = HF3FSConnectorMetadata()
-        metadata.preempted_req_ids = set(scheduler_output.preempted_req_ids or ())
 
         for request_id in scheduler_output.finished_req_ids:
             self._scheduling_states.pop(request_id, None)
@@ -874,11 +812,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             state.allocated_block_ids = state.load_op.need_fetch_block_ids.copy()
 
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state,
-                self._block_size,
-                state.load_op,
-                num_cached_blocks,
-                self._get_request_block_hashes(state.request),
+                state, self._block_size, state.load_op, num_cached_blocks
             )
 
             if request_metadata:
@@ -909,11 +843,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
 
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state,
-                self._block_size,
-                None,
-                num_cached_blocks,
-                self._get_request_block_hashes(state.request),
+                state, self._block_size, None, num_cached_blocks
             )
 
             if request_metadata:
@@ -931,21 +861,17 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             # Update with new tokens and blocks
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            num_tokens = cached_reqs.num_computed_tokens[i] + num_new_tokens
-            state.token_ids = state.request.all_token_ids[:num_tokens].copy()
+            num_current_tokens = len(state.token_ids)
+            new_token_ids = state.request.all_token_ids[
+                num_current_tokens : num_current_tokens + num_new_tokens
+            ]
             new_block_ids = cached_reqs.new_block_ids[i]
-            if request_id in cached_reqs.resumed_req_ids:
-                assert new_block_ids is not None
-                state.allocated_block_ids = new_block_ids[0].copy()
-                state.num_saved_blocks = 0
-            else:
-                state.update_tokens_and_blocks([], new_block_ids)
+
+            state.update_tokens_and_blocks(new_token_ids, new_block_ids)
 
             # Create save metadata
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state,
-                self._block_size,
-                block_hashes=self._get_request_block_hashes(state.request),
+                state, self._block_size, None
             )
 
             if request_metadata:
@@ -1016,20 +942,6 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         state.token_ids = request.prompt_token_ids[:num_tokens_to_compute].copy()
         state.allocated_block_ids = unfolded_block_ids
         state.num_saved_blocks = 0
-
-    def _get_request_block_hashes(self, request: Request | None) -> list[str] | None:
-        """Snapshot core lookahead identities at the storage block boundaries."""
-        if not self._num_hash_lookahead_tokens:
-            return None
-        assert request is not None
-        assert self._hash_block_size is not None
-        hashes = BlockHashListWithBlockSize(
-            request.block_hashes, self._hash_block_size, self._block_size
-        )
-        return [
-            hashlib.sha256(self._hash_namespace.encode() + block_hash).hexdigest()
-            for block_hash in hashes
-        ]
 
     def _generate_block_hashes(
         self,

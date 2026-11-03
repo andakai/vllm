@@ -1,110 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.util
-import pickle
-import sys
 from collections.abc import Iterator
-from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1,
-    KVConnectorMetadata,
-    KVConnectorRole,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
-
-from .utils import create_vllm_config, set_mtp_config
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("external_support", [None, False, True])
-@pytest.mark.parametrize("force_builtin", [False, True])
-def test_mp_legacy_packages_do_not_inherit_new_default(
-    monkeypatch, external_support, force_builtin
-):
-    pytest.importorskip("lmcache")
-    external_name = "lmcache.integration.vllm.lmcache_mp_connector"
-    external = ModuleType(external_name)
-    attributes: dict[str, object] = {"__module__": external_name}
-    if external_support is not None:
-        attributes["supports_lookahead_block_hashes"] = classmethod(
-            lambda cls, config: external_support
-        )
-    external.LMCacheMPConnector = type(  # type: ignore[attr-defined]
-        "LMCacheMPConnector", (KVConnectorBase_V1,), attributes
-    )
-    monkeypatch.setitem(sys.modules, external_name, external)
-    if force_builtin:
-        monkeypatch.setenv("LMCACHE_USE_UPSTREAM_MP", "1")
-    else:
-        monkeypatch.delenv("LMCACHE_USE_UPSTREAM_MP", raising=False)
-
-    original = importlib.util.find_spec(
-        "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector"
-    )
-    assert original is not None and original.origin is not None
-    spec = importlib.util.spec_from_file_location("_test_mp_resolver", original.origin)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
-    connector_cls = module.LMCacheMPConnector
-    config = KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
-    assert KVConnectorBase_V1.supports_lookahead_block_hashes(config)
-    assert connector_cls.supports_lookahead_block_hashes(config) is (
-        external_support is True and not force_builtin
-    )
-    assert pickle.loads(pickle.dumps(connector_cls)) is connector_cls
-
-
-@pytest.mark.parametrize("version", [None, 1, 2])
-@pytest.mark.parametrize("use_native", [False, True])
-@pytest.mark.parametrize("inprocess_module", [False, True])
-def test_lookahead_requires_versioned_external_adapter(
-    monkeypatch, version, use_native, inprocess_module
-):
-    calls = []
-
-    class ExternalAdapter:
-        LOOKAHEAD_HASHES_VERSION: int
-
-        def __init__(self, config, role, parent, kv_cache_config=None):
-            calls.append(kv_cache_config)
-
-    if version is not None:
-        ExternalAdapter.LOOKAHEAD_HASHES_VERSION = version
-    new_path = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
-    old_path = "lmcache.integration.vllm.vllm_v1_adapter"
-    module = ModuleType(new_path if inprocess_module else old_path)
-    module.LMCacheConnectorV1Impl = ExternalAdapter  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setitem(sys.modules, old_path if inprocess_module else new_path, None)
-    config = create_vllm_config(block_size=16, max_num_batched_tokens=512)
-    config.kv_transfer_config = KVTransferConfig(
-        kv_connector="LMCacheConnectorV1",
-        kv_role="kv_both",
-        kv_connector_extra_config={"use_native": use_native},
-    )
-    set_mtp_config(config, 4)
-    assert config.num_hash_lookahead_tokens == (
-        1 if version == 1 and not use_native else 0
-    )
-    if not use_native:
-        cache_config = KVCacheConfig(
-            num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[]
-        )
-        LMCacheConnectorV1(config, KVConnectorRole.SCHEDULER, cache_config)
-        assert calls == [cache_config if version == 1 else None]
 
 
 @pytest.fixture
@@ -186,15 +93,11 @@ class TestGetKVConnectorKVCacheEvents:
 
         assert result is None
 
-    @pytest.mark.parametrize("lookahead", [None, [[5], [6]]])
-    def test_converts_single_event(
-        self, mock_connector, mock_lmcache_engine_event, lookahead
-    ):
+    def test_converts_single_event(self, mock_connector, mock_lmcache_engine_event):
         """Test conversion of a single event from lmcache engine format."""
         mock_connector._lmcache_engine.get_kv_events.return_value = [
             mock_lmcache_engine_event
         ]
-        mock_lmcache_engine_event.lookahead_token_ids = lookahead
 
         result = mock_connector.get_kv_connector_kv_cache_events()
 
@@ -212,7 +115,6 @@ class TestGetKVConnectorKVCacheEvents:
         assert events[0].block_size == 16
         assert events[0].medium == "GPU"
         assert events[0].lora_name is None
-        assert events[0].lookahead_token_ids == lookahead
 
     def test_converts_multiple_events(self, mock_connector):
         """Test conversion of multiple events from lmcache engine format."""
@@ -914,25 +816,3 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
         connector.clear_connector_metadata()
 
     assert connector._lmcache_engine.layerwise_storers == []
-
-
-@pytest.mark.parametrize("inprocess_module", [False, True])
-def test_constructs_external_adapter_at_current_or_legacy_path(
-    monkeypatch, inprocess_module
-):
-    calls = []
-
-    class ExternalAdapter:
-        def __init__(self, config, role, parent):
-            calls.append((config, role, parent))
-
-    new_path = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
-    old_path = "lmcache.integration.vllm.vllm_v1_adapter"
-    module = ModuleType(new_path if inprocess_module else old_path)
-    module.LMCacheConnectorV1Impl = ExternalAdapter  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setitem(sys.modules, old_path if inprocess_module else new_path, None)
-    config = create_vllm_config(kv_connector="LMCacheConnectorV1")
-    cache = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
-    connector = LMCacheConnectorV1(config, KVConnectorRole.SCHEDULER, cache)
-    assert calls == [(config, KVConnectorRole.SCHEDULER, connector)]

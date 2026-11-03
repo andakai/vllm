@@ -4,7 +4,6 @@ import enum
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from inspect import getattr_static
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -12,7 +11,7 @@ import zmq
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -469,13 +468,6 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     """
-
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: KVTransferConfig
-    ) -> bool:
-        """The builtin fallback still uses the legacy external key protocol."""
-        return False
 
     def __init__(
         self,
@@ -1212,20 +1204,6 @@ def _resolve_lmcache_mp_connector() -> type[KVConnectorBase_V1]:
             "Using external LMCacheMPConnector from "
             "lmcache.integration.vllm.lmcache_mp_connector"
         )
-        capability = "supports_lookahead_block_hashes"
-        if getattr_static(_ExternalLMCacheMPConnector, capability) is getattr_static(
-            KVConnectorBase_V1, capability
-        ):
-            # Old packages inherited the former False default. Preserve it without
-            # mutating the external class; the public module alias remains picklable.
-            return type(
-                "LMCacheMPConnector",
-                (_ExternalLMCacheMPConnector,),
-                {
-                    "__module__": __name__,
-                    capability: getattr_static(LMCacheMPConnectorUpstream, capability),
-                },
-            )
         return _ExternalLMCacheMPConnector
     except ImportError as e:
         logger.info(

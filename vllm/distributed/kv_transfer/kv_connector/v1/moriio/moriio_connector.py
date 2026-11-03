@@ -533,9 +533,9 @@ def _validate_hybrid_speculation(vllm_config: VllmConfig) -> None:
     if speculative_config is None:
         return
     # Other hybrid speculative methods need their own transfer validation.
-    if not (speculative_config.use_dspark() or speculative_config.method == "mtp"):
+    if not speculative_config.use_dspark():
         raise MoRIIOError(
-            "MoRIIO hybrid WRITE supports DSpark and MTP speculative decoding, got "
+            "MoRIIO hybrid WRITE supports DSpark speculative decoding only, got "
             f"method={speculative_config.method!r}"
         )
 
@@ -865,8 +865,10 @@ class MoRIIOConnectorScheduler:
         if not params.get("do_remote_prefill"):
             return 0, False
         if self.mode == MoRIIOMode.WRITE:
-            backoff = self._prefill_backoff()
-            num_external_tokens = max(num_external_tokens - backoff, 0)
+            if self._has_mamba:
+                # P pushes h(N-1). Do not publish it under the N-token hash
+                # when the scheduler caches a completed asynchronous load.
+                num_external_tokens = max(num_external_tokens - 1, 0)
             return num_external_tokens, num_external_tokens > 0
 
         # READ mode always recomputes the last token locally on the decoder.
@@ -875,13 +877,7 @@ class MoRIIOConnectorScheduler:
         # arrived. False keeps the wait on this side: the forward runs in the
         # same step, and the connector blocks in start_load_kv, before the
         # forward, until the KV is really there.
-        return max(num_external_tokens - max(1, self._prefill_backoff()), 0), False
-
-    def _prefill_backoff(self) -> int:
-        return max(
-            1 if self._has_mamba else 0,
-            self.vllm_config.num_prefill_lookahead_tokens - 1,
-        )
+        return max(num_external_tokens - 1, 0), False
 
     def on_new_request(self, request: "Request") -> None:
         """Scheduler hook fired when a request is admitted.
@@ -893,36 +889,37 @@ class MoRIIOConnectorScheduler:
         the full length. On a full hit that leaves ``num_computed_tokens ==
         num_tokens`` and trips the scheduler's ``num_new_tokens > 0`` assert.
         """
-        if not self.is_producer or not self._prefill_backoff():
+        if not (self.is_producer and self._has_mamba):
             return
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
             self._truncate_mamba_request_for_prefill(request)
 
     def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
-        """Leave the Mamba state / multi-module MTP tail for local recomputation."""
-        backoff = max(1, self._prefill_backoff())
+        """P-side only: drop the last prompt token so the prefiller computes
+        h(N-1) instead of h(N).
+
+        The decoder recomputes the last token locally to derive h(N) correctly
+        (see the READ len-1 accounting in get_num_new_matched_tokens). Guarded
+        by ``_p_side_truncated`` to avoid repeated truncation across a
+        preemption/reschedule. Mirrors the NIXL scheduler.
+        """
         params = request.kv_transfer_params
         if (
             params is not None
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > backoff
+            and request.num_prompt_tokens > 1
         ):
             if request.prompt_token_ids is not None:
-                del request.prompt_token_ids[-backoff:]
+                request.prompt_token_ids.pop()
             elif request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-backoff]
+                request.prompt_embeds = request.prompt_embeds[:-1]
             else:
                 return
 
-            del request._all_token_ids[-backoff:]
-            request.num_prompt_tokens -= backoff
+            request._all_token_ids.pop()
+            request.num_prompt_tokens -= 1
             request.max_tokens = 1
-            hash_block_size = self.kv_cache_config.hash_block_size
-            assert hash_block_size is not None
-            request.truncate_block_hashes(
-                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
-            )
             params["_p_side_truncated"] = True
 
     def send_notify_block(

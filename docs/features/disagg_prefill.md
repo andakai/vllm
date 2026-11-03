@@ -45,64 +45,9 @@ Now supports 9 types of connectors:
 
 - **FlexKVConnectorV1**: refer to [examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py](../../examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py) for the example usage of FlexKVConnectorV1. FlexKV is a distributed KV Store and multi-level cache management system for ultra-large-scale LLM inference.
 
-  Lookahead block hashing requires a FlexKV adapter advertising
-  `LOOKAHEAD_HASHES_VERSION = 1` and a matching FlexKV server. Older adapters
-  retain legacy hashing. The adapter receives the resolved KV cache configuration
-  so its host allocation includes draft KV layers. The initial protocol supports
-  one KV cache group with pipeline parallel size 1; other layouts require further
-  adapter support. Lookahead selects the token-major `LBNHC` layout required by
-  FlexKV transfers. Use an attention backend that supports this layout, such as
-  FlashAttention; a backend restricted to head-major layouts cannot use this
-  transfer implementation. This does not remove the legacy EAGLE block-drop path.
-
   ```bash
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
-
-- **LMCacheConnectorV1 lookahead** requires an external adapter advertising
-  `LOOKAHEAD_HASHES_VERSION = 1`. Older packages and `use_native=True` retain
-  legacy hashing. The wrapper loads `lmcache.inprocess.integration.vllm` on
-  newer packages and the former `lmcache.integration.vllm` path on older ones.
-  The initial in-process implementation supports one
-  full-attention KV group, without pipeline/context parallelism, layerwise
-  transfer, CacheBlend, or LMCache P/D transfer. Unsupported combinations are
-  rejected when lookahead is enabled; disable lookahead to use a legacy path.
-  Hash-only suffix tokens do not allocate KV slots. Cache entries are isolated
-  by model/draft configuration, layout, LoRA, and cache salt. This capability is
-  separate from the external `LMCacheMPConnector` implementation.
-
-- **ExampleConnector lookahead** uses core block hashes, including the following
-  token window and request identity, in a separate model/draft namespace. It
-  publishes target and draft KV together after the forward pass, using an atomic
-  file replacement. This debug path supports one full-attention KV group on a
-  single GPU and caches only a complete prompt prefix; chunked prefill waits
-  until that prefix is computed. It does not save the terminal partial block.
-  Disabling lookahead retains the legacy example file format.
-
-## Lookahead hashing compatibility
-
-Connectors support core lookahead block hashing by default. MoRIIO updates
-hashes when truncating a hybrid producer's prompt. UMBP uses the core hash policy
-for external hits and stores completed KV once its lookahead hash is available.
-Existing model and transfer-mode restrictions still apply. LMCache and FlexKV wrappers
-require compatible external implementations; older packages and the builtin
-LMCache paths keep legacy hashing. A `MultiConnector` enables lookahead only
-when all children support it and propagates the parent's resolved hash policy.
-
-External connectors loaded with `kv_connector_module_path` inherit the new
-default. Their authors must ensure independent cache keys include the required
-following tokens and that transfers contain only computed KV, with draft layers
-ready before publication. Connectors that still assume one hash per complete
-block, truncate tokens without updating hashes, or use legacy external keys
-must override `supports_lookahead_block_hashes` to return `False` until adapted.
-This default is a compatibility contract, not certification of arbitrary
-third-party code. The legacy EAGLE block-drop path and explicit
-`disable_lookahead_block_hashes` setting remain available.
-
-MoRIIO hybrid WRITE supports DSpark and MTP. Both endpoints must use the same
-draft configuration; the producer leaves the Mamba state or multi-module MTP
-tail for the decoder to recompute locally. Sliding-window WRITE with speculative
-decoding remains unsupported.
 
 ## Reusing prefill token ids on decode
 
@@ -187,17 +132,3 @@ We recommend three ways of implementations:
 - **Fully-customized connector**: Implement your own `Connector`, and call third-party libraries to send and receive KV caches, and many many more (like editing vLLM's model input to perform customized prefilling, etc.). This approach gives you the most control, but at the risk of being incompatible with future vLLM versions.
 - **Database-like connector**: Implement your own `LookupBuffer` and support the `insert` and `drop_select` APIs just like SQL.
 - **Distributed P2P connector**: Implement your own `Pipe` and support the `send_tensor` and `recv_tensor` APIs, just like `torch.distributed`.
-
-### LMCache adapter package compatibility
-
-`LMCacheConnectorV1` discovers the external adapter in the current
-`lmcache.inprocess.integration.vllm` package, with a fallback to
-`lmcache.integration.vllm` for older releases. Missing dependencies inside an
-installed adapter are reported rather than mistaken for an older package layout.
-
-### FlexKV speculative KV layout
-
-For hidden-state speculative decoding, FlexKV requests token-major `LBNHC` KV
-layout so target and draft layers use the strides expected by its transfer engine.
-This also applies with legacy block hashing. The external FlexKV adapter must
-allocate storage for every registered KV layer, including draft layers.

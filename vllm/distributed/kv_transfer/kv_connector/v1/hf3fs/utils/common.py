@@ -96,7 +96,6 @@ class HF3FSRequestMetadata:
     block_ids: list[int]
     load_block_op: LoadBlockInfo | None = None
     save_block_op: SaveBlockInfo | None = None
-    block_hashes: list[str] | None = None
 
     @staticmethod
     def from_scheduling_state(
@@ -104,13 +103,10 @@ class HF3FSRequestMetadata:
         block_size: int,
         load_op: LoadBlockInfo | None = None,
         skip_leading_blocks: int | None = None,
-        block_hashes: list[str] | None = None,
     ) -> Optional["HF3FSRequestMetadata"]:
         """Create request metadata from scheduling state."""
         token_count = len(state.token_ids)
         total_blocks = token_count // block_size
-        if block_hashes is not None:
-            total_blocks = min(total_blocks, len(block_hashes))
 
         skip_blocks = (
             state.num_saved_blocks
@@ -118,24 +114,17 @@ class HF3FSRequestMetadata:
             else skip_leading_blocks
         )
 
-        new_blocks_to_save = total_blocks - skip_blocks
+        new_blocks_to_save = total_blocks - state.num_saved_blocks
         if new_blocks_to_save <= 0 and load_op is None:
             return None
 
         state.num_saved_blocks = total_blocks
         return HF3FSRequestMetadata(
             request_id=state.request_id,
-            token_ids=state.token_ids.copy(),
-            block_ids=state.allocated_block_ids.copy(),
+            token_ids=state.token_ids,
+            block_ids=state.allocated_block_ids,
             load_block_op=load_op,
-            save_block_op=(
-                SaveBlockInfo(skip_leading_blocks=skip_blocks)
-                if new_blocks_to_save > 0
-                else None
-            ),
-            block_hashes=(
-                block_hashes[:total_blocks] if block_hashes is not None else None
-            ),
+            save_block_op=SaveBlockInfo(skip_leading_blocks=skip_blocks),
         )
 
 
@@ -144,7 +133,6 @@ class HF3FSConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
         self.requests: list[HF3FSRequestMetadata] = []
-        self.preempted_req_ids: set[str] = set()
 
     def add_request(self, request_metadata: HF3FSRequestMetadata) -> None:
         """Add request to metadata."""

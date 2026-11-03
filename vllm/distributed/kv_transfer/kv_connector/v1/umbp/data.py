@@ -48,6 +48,25 @@ def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
     }
 
 
+def _model_fingerprint(model_config: Any) -> dict[str, Any]:
+    """Effective model settings that change the KV a checkpoint produces.
+
+    ``hf_config`` already has ``hf_overrides`` applied, so overridden RoPE or
+    attention settings separate engines that share the same model path.
+    """
+    hf_config = getattr(model_config, "hf_config", None)
+    to_dict = getattr(hf_config, "to_dict", None)
+    config = dict(to_dict()) if callable(to_dict) else {}
+    # Neither changes the KV, and either would split engines sharing a pool.
+    config.pop("_name_or_path", None)
+    config.pop("transformers_version", None)
+    return {
+        "dtype": str(getattr(model_config, "dtype", None)),
+        "quantization": getattr(model_config, "quantization", None),
+        "hf_config": config,
+    }
+
+
 @dataclass(frozen=True)
 class RankTopology:
     """Model-parallel ranks that participate in one KV object."""
@@ -175,6 +194,7 @@ class UMBPNamespace:
         fields = {
             "model": getattr(model_config, "model", ""),
             "revision": getattr(model_config, "revision", None),
+            "model_config": _model_fingerprint(model_config),
             "block_size": vllm_config.cache_config.block_size,
             "cache_layout": getattr(kv_cache_config, "kv_cache_layout", None),
             "groups": [
@@ -197,7 +217,9 @@ class UMBPNamespace:
         if speculative is not None:
             # Added only when set, so namespaces without a drafter are unchanged.
             fields["speculative"] = speculative
-        payload = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+        payload = json.dumps(
+            fields, sort_keys=True, separators=(",", ":"), default=str
+        ).encode()
         return cls(hashlib.sha256(payload).hexdigest()[:32])
 
 
@@ -526,7 +548,6 @@ class BlockTransferPlan:
     token_ids: tuple[int, ...] = ()
     block_size: int = 0
     medium: str = "CPU"
-    lookahead_token_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -578,7 +599,6 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
     token_ids: list[tuple[int, ...]]
     block_sizes: list[int]
     request_id: str
-    lookahead_token_ids: list[tuple[int, ...]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         length = len(self.keys)
@@ -592,8 +612,6 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
         )
         if any(len(column) != length for column in columns):
             raise ValueError("store batch columns must have equal lengths")
-        if self.lookahead_token_ids and len(self.lookahead_token_ids) != length:
-            raise ValueError("store batch lookahead column must have equal length")
 
     def __len__(self) -> int:
         return len(self.keys)
@@ -618,9 +636,6 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
             parent_block_hash=self.parent_block_hashes[index],
             token_ids=self.token_ids[index],
             block_size=self.block_sizes[index],
-            lookahead_token_ids=(
-                self.lookahead_token_ids[index] if self.lookahead_token_ids else ()
-            ),
         )
 
     def localized(self, keys: list[str]) -> BlockStoreBatch:
@@ -648,13 +663,11 @@ class RequestTracker:
     saved_tokens: int = 0
     block_ids: tuple[list[int], ...] = ()
     load_spec: LoadSpec | None = None
-    has_scheduled_compute: bool = False
 
     def reset(self) -> None:
         self.saved_tokens = 0
         self.block_ids = ()
         self.load_spec = None
-        self.has_scheduled_compute = False
 
     def update_blocks(self, block_ids: tuple[list[int], ...]) -> None:
         if not self.block_ids:
@@ -682,6 +695,10 @@ class RequestTracker:
             return self.saved_tokens
         self.saved_tokens = complete_tokens
         return complete_tokens
+
+
+# Error prefix of a transfer a runtime refused without touching the pool.
+TRANSFER_NOT_ATTEMPTED = "transfer not attempted"
 
 
 class TransferJobStatus(str, Enum):

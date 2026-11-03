@@ -18,12 +18,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.config import KVTransferConfig, SpeculativeConfig, VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.config.kv_transfer import KVRole
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from .utils import create_vllm_config, set_mtp_config
+from .utils import create_vllm_config
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -123,38 +123,6 @@ class TestFlexKVConnectorImportError:
             )
 
         assert "https://github.com/taco-project/FlexKV" in str(exc_info.value)
-
-
-@pytest.mark.parametrize("protocol_version", [None, 1, 2])
-@pytest.mark.parametrize("disabled", [False, True])
-def test_lookahead_requires_compatible_external_adapter(protocol_version, disabled):
-    from vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector import (
-        FlexKVConnectorV1,
-    )
-
-    class ExternalAdapter:
-        LOOKAHEAD_HASHES_VERSION: int
-
-        def __init__(self, config, role, kv_cache_config=None):
-            self.cache_config = kv_cache_config
-
-    if protocol_version is not None:
-        ExternalAdapter.LOOKAHEAD_HASHES_VERSION = protocol_version
-    with _install_flexkv_mock(MagicMock()) as modules:
-        adapter = modules["flexkv.integration.vllm.vllm_v1_adapter"]
-        adapter.FlexKVConnectorV1Impl = ExternalAdapter
-        config = _make_vllm_config()
-        set_mtp_config(config, 4, disable_lookahead_block_hashes=disabled)
-        assert config.num_hash_lookahead_tokens == (
-            1 if protocol_version == 1 and not disabled else 0
-        )
-        cache_config = KVCacheConfig(
-            num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[]
-        )
-        connector = FlexKVConnectorV1(config, KVConnectorRole.WORKER, cache_config)
-        assert connector._flexkv_connector.cache_config is (
-            cache_config if protocol_version == 1 else None
-        )
 
 
 class TestFlexKVConnectorDelegation:
@@ -261,23 +229,3 @@ class TestFlexKVConnectorDelegation:
         connector, impl = connector_and_impl
         connector.wait_for_layer_load("layer_0")
         impl.wait_for_layer_load.assert_called_once_with("layer_0")
-
-
-@pytest.mark.parametrize("method", [None, "ngram", "eagle3", "mtp"])
-def test_speculative_transfer_layout_does_not_depend_on_hash_lookahead(method):
-    from vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector import (
-        FlexKVConnectorV1,
-    )
-
-    config = VllmConfig()
-    if method is not None:
-        config.speculative_config = SpeculativeConfig(
-            model="ngram",
-            num_speculative_tokens=4,
-            disable_lookahead_block_hashes=True,
-        )
-        config.speculative_config.method = method
-    assert config.num_hash_lookahead_tokens == 0
-    assert FlexKVConnectorV1.get_required_kvcache_layout(config) == (
-        "LBNHC" if method in ("eagle3", "mtp") else None
-    )
