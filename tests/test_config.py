@@ -4074,6 +4074,96 @@ def test_draft_kv_lookahead_dependency(
     assert speculative_config.use_hash_lookahead() is needs_lookahead
 
 
+@pytest.fixture
+def gemma4_mtp_config(tmp_path: Path):
+    from transformers import Gemma4AssistantConfig, Gemma4TextConfig
+
+    text_config = Gemma4TextConfig(
+        architectures=["Gemma4ForCausalLM"],
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        global_head_dim=16,
+        vocab_size=256,
+        max_position_embeddings=128,
+        layer_types=["sliding_attention", "full_attention"],
+        hidden_size_per_layer_input=0,
+        vocab_size_per_layer_input=0,
+        enable_moe_block=False,
+        use_double_wide_mlp=False,
+    )
+    target_path, draft_path = tmp_path / "target", tmp_path / "assistant"
+    text_config.save_pretrained(target_path)
+    Gemma4AssistantConfig(
+        architectures=["Gemma4AssistantForCausalLM"],
+        text_config=text_config.to_dict(),
+        backbone_hidden_size=64,
+    ).save_pretrained(draft_path)
+    target = ModelConfig(
+        model=str(target_path), tokenizer_mode="skip", max_model_len=128
+    )
+    parallel = ParallelConfig(distributed_executor_backend="uni")
+    spec = SpeculativeConfig(
+        method="mtp",
+        model=str(draft_path),
+        num_speculative_tokens=2,
+        target_model_config=target,
+        target_parallel_config=parallel,
+    )
+    return VllmConfig(
+        model_config=target,
+        parallel_config=parallel,
+        speculative_config=spec,
+        cache_config=CacheConfig(enable_prefix_caching=True),
+        scheduler_config=SchedulerConfig(max_model_len=128, is_encoder_decoder=False),
+    )
+
+
+def test_gemma4_mtp_uses_target_kv_hashes(gemma4_mtp_config):
+    config = gemma4_mtp_config
+    assert config.speculative_config.use_gemma4_mtp()
+    assert config.speculative_config.use_eagle()
+    assert config.num_prefill_lookahead_tokens == 1
+    assert config.num_hash_lookahead_tokens == 0
+
+
+@pytest.mark.parametrize("prefix_caching", [False, True])
+@pytest.mark.parametrize("hma", [False, True])
+def test_gemma4_mtp_connector_does_not_require_lookahead(
+    gemma4_mtp_config, prefix_caching, hma, tmp_path
+):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+        ExampleConnector,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    config = gemma4_mtp_config
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.scheduler_config.disable_hybrid_kv_cache_manager = not hma
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="ExampleConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+    )
+    kv_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    if hma:
+        with pytest.raises(ValueError, match="does not support HMA"):
+            KVConnectorFactory.create_connector(
+                config, KVConnectorRole.SCHEDULER, kv_config
+            )
+    else:
+        connector = KVConnectorFactory.create_connector(
+            config, KVConnectorRole.SCHEDULER, kv_config
+        )
+        assert isinstance(connector, ExampleConnector)
+        assert config.num_hash_lookahead_tokens == 0
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
