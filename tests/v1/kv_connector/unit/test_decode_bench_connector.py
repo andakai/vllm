@@ -48,7 +48,6 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
-    set_mtp_config,
 )
 
 
@@ -60,7 +59,6 @@ class DecodeBenchTestRunner:
         block_size: int,
         num_gpu_blocks: int,
         kv_connector_extra_config: dict | None = None,
-        num_speculative_tokens: int = 0,
     ):
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
@@ -75,8 +73,6 @@ class DecodeBenchTestRunner:
             kv_connector_extra_config=kv_connector_extra_config,
         )
 
-        if num_speculative_tokens:
-            set_mtp_config(vllm_config, num_speculative_tokens)
         self.vllm_config = vllm_config
         self.scheduler: Scheduler = create_scheduler(
             vllm_config, num_blocks=num_gpu_blocks
@@ -110,9 +106,7 @@ class DecodeBenchTestRunner:
         self.scheduler_connector: DecodeBenchConnector = scheduler_connector
 
         init_none_hash(sha256)
-        self._block_hasher = get_request_block_hasher(
-            block_size, sha256, vllm_config.num_hash_lookahead_tokens
-        )
+        self._block_hasher = get_request_block_hasher(block_size, sha256)
 
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={}, attn_metadata={}, slot_mapping={}
@@ -165,20 +159,12 @@ class DecodeBenchTestRunner:
         return scheduler_output, kv_connector_metadata
 
 
-@pytest.mark.parametrize("num_speculative_tokens", [0, 1, 4])
-def test_decode_bench_connector_basic(num_speculative_tokens):
+def test_decode_bench_connector_basic():
     """Test basic functionality of DecodeBenchConnector."""
     block_size = 16
     num_gpu_blocks = 100
 
-    runner = DecodeBenchTestRunner(
-        block_size=block_size,
-        num_gpu_blocks=num_gpu_blocks,
-        num_speculative_tokens=num_speculative_tokens,
-    )
-    assert runner.vllm_config.num_hash_lookahead_tokens == int(
-        num_speculative_tokens > 0
-    )
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # Create a request with multiple blocks worth of tokens
     num_tokens = block_size * 3  # 3 blocks

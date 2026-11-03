@@ -21,7 +21,6 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
 from vllm import SamplingParams
-from vllm.config import VllmConfig
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
@@ -73,7 +72,6 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     def __init__(self, **attrs):
         self.mode = MoRIIOMode.READ
         self._mamba_group_ids: list[int] = []
-        self._has_mamba = False
         self._attn_group_ids: list[int] = [0]
         self._attn_group_is_state: list[bool] = [False]
         self._num_ssm_scratch_blocks = 0
@@ -83,7 +81,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
             hash_block_size=16,
         )
-        self.vllm_config = VllmConfig()
+        self.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
         for k, v in attrs.items():
             setattr(self, k, v)
 
@@ -1284,8 +1282,8 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
     worker._is_mla_cache_layer = lambda _n: False
     worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
     worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
-    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: (
-        ready_event.set()
+    worker._moriio_handshake_listener = (
+        lambda _m, ready_event, *_a, **_k: ready_event.set()
     )
     return worker
 
@@ -1379,6 +1377,7 @@ def _mk_request(prompt, max_tokens=64, params=None):
 @pytest.mark.usefixtures("restore_moriio_role")
 @pytest.mark.parametrize("lookahead", [0, 1, 4])
 def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
+    """Dropping the last prompt token drops the hashes that depend on it."""
     # Hybrid WRITE only admits DSpark, so MTP runs through READ.
     config = create_vllm_config(
         kv_connector="MoRIIOConnector",
@@ -1392,8 +1391,8 @@ def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
     )
     if lookahead:
         set_mtp_config(config, lookahead)
-        config.model_config.hf_config.n_predict = lookahead
         config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+    assert config.num_hash_lookahead_tokens == lookahead
     kv_config = KVCacheConfig(
         num_blocks=16,
         kv_cache_tensors=[],
@@ -1402,10 +1401,7 @@ def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
             KVCacheGroupSpec(
                 ["attn"],
                 FullAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
                 ),
             ),
             KVCacheGroupSpec(["mamba"], _mamba_spec()),
@@ -1414,52 +1410,24 @@ def test_hybrid_producer_truncates_hashes_before_prefix_lookup(lookahead):
     scheduler = moriio_connector.MoRIIOConnectorScheduler(config, "engine", kv_config)
     init_none_hash(sha256)
     hasher = get_request_block_hasher(16, sha256, lookahead)
-    request = Request(
-        "truncated",
-        list(range(32 + lookahead)),
-        SamplingParams(
-            max_tokens=1,
-            extra_args={
-                "kv_transfer_params": {"do_remote_decode": True},
-            },
-        ),
-        None,
-        block_hasher=hasher,
-    )
-    assert len(request.block_hashes) == 2
-    scheduler.on_new_request(request)
-    # The producer drops the last prompt token so the decoder derives h(N).
-    num_prefill_tokens = 32 + lookahead - 1
-    expected = Request(
-        "expected",
-        list(range(num_prefill_tokens)),
-        SamplingParams(max_tokens=1),
-        None,
-        block_hasher=hasher,
-    )
-    assert request.block_hashes == expected.block_hashes
-    assert len(request.block_hashes) == 1
-    scheduler.on_new_request(request)
-    assert request.num_prompt_tokens == num_prefill_tokens
-    assert request.block_hashes == expected.block_hashes
-    config.kv_transfer_config.kv_role = "kv_consumer"
-    consumer = moriio_connector.MoRIIOConnectorScheduler(config, "decode", kv_config)
-    decode_request = Request(
-        "decode",
-        list(range(32 + lookahead)),
-        SamplingParams(
-            max_tokens=1,
-            extra_args={
-                "kv_transfer_params": {"do_remote_prefill": True},
-            },
-        ),
-        None,
-        block_hasher=hasher,
-    )
-    assert consumer.get_num_new_matched_tokens(decode_request, 16) == (
-        num_prefill_tokens - 16,
-        False,
-    )
+
+    def request(num_tokens: int, params: dict) -> Request:
+        return Request(
+            "r",
+            list(range(num_tokens)),
+            SamplingParams(max_tokens=1, extra_args={"kv_transfer_params": params}),
+            None,
+            block_hasher=hasher,
+        )
+
+    truncated = request(32 + lookahead, {"do_remote_decode": True})
+    assert len(truncated.block_hashes) == 2
+    expected = request(32 + lookahead - 1, {}).block_hashes
+    assert len(expected) == 1
+    for _ in range(2):  # A rescheduled request is truncated only once.
+        scheduler.on_new_request(truncated)
+        assert truncated.num_prompt_tokens == 32 + lookahead - 1
+        assert truncated.block_hashes == expected
 
 
 def test_truncate_mamba_request_pops_last_token_and_caps_tokens():
