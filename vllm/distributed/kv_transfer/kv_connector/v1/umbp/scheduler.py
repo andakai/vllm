@@ -1183,14 +1183,12 @@ class UMBPStoreConnectorScheduler:
         self, request: Request, block_ids: tuple[list[int], ...]
     ) -> None:
         """Pin completed KV whose hash became available with the last sample."""
-        pool = self._gpu_block_pool
         tracker = self._request_trackers.get(request.request_id)
         # Only a request that computed KV has saved any; one still waiting for
         # its load has not.
         if (
             not self.store_enabled
             or not self.num_hash_lookahead_tokens
-            or pool is None
             or tracker is None
             or not tracker.saved_tokens
         ):
@@ -1216,6 +1214,8 @@ class UMBPStoreConnectorScheduler:
         )
         if not plans:
             return
+        pool = self._gpu_block_pool
+        assert pool is not None
         # Full blocks end before the partial tail, so their pins never overlap.
         pool.touch(
             [pool.blocks[block_id] for block_id in dict.fromkeys(plans.block_ids)]
