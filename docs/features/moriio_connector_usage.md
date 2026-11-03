@@ -144,9 +144,9 @@ For DSpark, configure the same draft model on both instances through `--speculat
 
 Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
 
-MoRIIO supports core lookahead block hashing. When the producer drops the last
-prompt token of a hybrid request, it also discards the block hashes that depend
-on that token, so its prefix cache only publishes blocks it computed. Both
+With speculative lookahead hashing, when the producer drops the last prompt
+token of a hybrid request, it also discards the block hashes that depend on that
+token, so its prefix cache only publishes blocks it computed. Both
 endpoints must use the same speculative configuration. Disabling lookahead
 hashing retains the legacy EAGLE block-drop path.
 

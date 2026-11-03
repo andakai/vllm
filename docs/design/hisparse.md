@@ -201,11 +201,11 @@ only then does the coordinator publish the host page for prefix reuse and
 release its destination lease. A host-write event separately protects direct
 CPU readers from writes already queued on the accelerator.
 
-HiSparse supports core lookahead hashing. The host pool uses the device pool's
-hash lookahead setting, including subsequent token IDs in cache events. Publication is limited
-to pages with both completed copies and available hashes, including after a
-request finishes or is cancelled. A copied tail page whose hash is still missing
-is released without becoming a reusable prefix.
+With speculative lookahead hashing, the host pool uses the device pool's hash
+lookahead, so its cache events carry the following token IDs. Publication is
+limited to pages with both completed copies and available hashes, including
+after a request finishes or is cancelled. A copied tail page whose hash is still
+missing is released without becoming a reusable prefix.
 
 The worker transfer contains only its transfer ID and physical copy
 coordinates. Request identity and logical page state remain in the scheduler.

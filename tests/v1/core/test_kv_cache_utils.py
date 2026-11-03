@@ -1195,15 +1195,19 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
-        pytest.param({"kv_connector": "ExampleConnector"}, 0, id="legacy-connector"),
         *(
             pytest.param({"kv_connector": connector}, 1, id=connector)
             for connector in (
+                "ExampleConnector",
                 "DecodeBenchConnector",
-                "HiSparseConnector",
                 "MoRIIOConnector",
                 "UMBPStoreConnector",
             )
+        ),
+        pytest.param(
+            {"kv_connector": "ExampleConnector", "enable_prefix_caching": False},
+            1,
+            id="kv-connector-no-prefix-caching",
         ),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],

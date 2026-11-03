@@ -363,10 +363,6 @@ except Exception as e:
 
 - To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation. Add `"kv_connector_extra_config":{"startup_fill":true}` to fill the whole KV cache once at startup instead of in the decode steps that admit new requests (see the connector docstring for its limitations).
 
-    DecodeBenchConnector supports core lookahead block hashes. It does not store
-    or retrieve external cache keys; its dummy KV remains suitable only for
-    performance measurements, not accuracy or speculative acceptance validation.
-
 - **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
 
 ## Fault tolerance and scale-down recovery
