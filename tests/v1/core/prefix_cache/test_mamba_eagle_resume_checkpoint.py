@@ -10,6 +10,7 @@ drives the real ``Scheduler._mamba_block_aligned_split`` and the real
 ``KVCacheManager``; no chunk boundary is hard-coded.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -33,10 +34,18 @@ def _manager(
     shared_prefix_checkpoint=True,
     num_blocks=8192,
     num_hash_lookahead_tokens=1,
+    internal_checkpoints=0,
     num_prefill_lookahead=0,
+    retention_interval=None,
 ):
     init_none_hash(sha256)
     config = _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba"])
+    group = config.kv_cache_groups[1]
+    group.kv_cache_spec = replace(
+        group.kv_cache_spec,
+        num_prefill_checkpoint_blocks=internal_checkpoints,
+        prefill_checkpoint_alignment=1 if internal_checkpoints else None,
+    )
     return make_kv_cache_manager(
         kv_cache_config=config,
         max_model_len=1 << 20,
@@ -45,6 +54,7 @@ def _manager(
         num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+        retention_interval=retention_interval,
     )
 
 
@@ -63,7 +73,10 @@ def _stub(manager, block_size, hash_block_size):
         max_num_scheduled_tokens=1 << 20,
         num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
         hash_block_size=hash_block_size,
-        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_has_prefill_checkpoint_blocks=(
+            manager.coordinator.single_type_managers[1].has_prefill_checkpoint_blocks
+        ),
+        mamba_prefill_checkpoint_alignment=1,
         mamba_partial_cache_hit=partial_hit,
         mamba_shared_prefix_checkpoint=(
             partial_hit and manager.mamba_shared_prefix_checkpoint
@@ -145,10 +158,15 @@ def _sibling_hit(manager, shared, suffix, hash_block_size):
 # The two positions a sibling resumes at
 
 
-def test_sibling_resumes_from_the_observed_junction():
+@pytest.mark.parametrize("lookahead", [0, 1])
+def test_sibling_resumes_from_the_observed_junction(lookahead):
     """The scheduler splits at the junction; the manager must cache there."""
     block_size, hash_block_size = 512, 32
-    manager = _manager(block_size, hash_block_size)
+    manager = _manager(
+        block_size,
+        hash_block_size,
+        num_hash_lookahead_tokens=lookahead,
+    )
     stub = _stub(manager, block_size, hash_block_size)
     assert stub.mamba_shared_prefix_checkpoint, "the feature must be armed"
     _orphaned_full_attention_tail(manager, stub, 2020)
@@ -343,9 +361,20 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
 
 
 @pytest.mark.parametrize("lookahead", [0, 1])
+@pytest.mark.parametrize("internal_checkpoints", [0, 1])
+@pytest.mark.parametrize("retention_interval", [None, 0])
 @pytest.mark.parametrize("num_prefill_lookahead", [0, 2, 33])
-def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
-    """Eligible junctions improve reuse; other configurations are unchanged."""
+def test_enabling_never_reduces_reuse(
+    lookahead, num_prefill_lookahead, internal_checkpoints, retention_interval
+):
+    """Eligible junctions improve reuse; unsupported configurations are unchanged.
+
+    With non-zero retention every chunk reserves an internal checkpoint, whose
+    publication would pre-empt the junction's.
+    """
+    eligible = num_prefill_lookahead <= 1 and not (
+        internal_checkpoints and retention_interval != 0
+    )
     block_size, hash_block_size = 512, 32
 
     def sibling_hit(shared_prefix_checkpoint):
@@ -355,9 +384,11 @@ def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
             shared_prefix_checkpoint=shared_prefix_checkpoint,
             num_hash_lookahead_tokens=lookahead,
             num_prefill_lookahead=num_prefill_lookahead,
+            internal_checkpoints=internal_checkpoints,
+            retention_interval=retention_interval,
         )
         assert manager.mamba_shared_prefix_checkpoint == (
-            shared_prefix_checkpoint and lookahead > 0 and num_prefill_lookahead <= 1
+            shared_prefix_checkpoint and eligible
         )
         stub = _stub(manager, block_size, hash_block_size)
         _orphaned_full_attention_tail(manager, stub, 2020)
@@ -372,7 +403,7 @@ def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
         return _sibling_hit(manager, 2017, [-2] * 583, hash_block_size)
 
     on, off = sibling_hit(True), sibling_hit(False)
-    if lookahead > 0 and num_prefill_lookahead <= 1:
+    if eligible:
         assert on > off
     else:
         assert on == off
