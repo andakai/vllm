@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
     _create_req_context,
+    _LookupPass,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -1184,6 +1185,18 @@ def test_partial_lookup_anchors_on_full_attention_prefix():
 
 
 @pytest.mark.cpu_test
+def test_partial_lookup_queries_each_key_once():
+    """Convergence and the tail search reuse earlier results of one lookup."""
+    scheduler = _make_partial_tail_scheduler()
+    _, req_status = _make_anchored_partial_tail_request(
+        scheduler, {0: {b"h3", b"h6"}, 1: {b"h6"}}
+    )
+    assert scheduler._lookup(req_status) == 28
+    keys = [call.args[0] for call in scheduler.manager.lookup.call_args_list]
+    assert keys and len(keys) == len(set(keys))
+
+
+@pytest.mark.cpu_test
 def test_partial_lookup_anchor_loads_only_verified_chunks():
     scheduler = _make_partial_tail_scheduler()
     request, req_status = _make_anchored_partial_tail_request(
@@ -2216,7 +2229,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     assert (
         runner.connector_scheduler._maximal_prefix_lookup(
             [key],
-            req_status.req_context,
+            _LookupPass(runner.manager, req_status.req_context),
             req_status.req,
             group_config,
             0,
@@ -3202,10 +3215,29 @@ _LOOKUP_REQ.request_id = "req"
 _LOOKUP_GROUP_CONFIG = MagicMock()
 
 
+def _lookup_pass(sched) -> _LookupPass:
+    return _LookupPass(sched.manager, _EMPTY_REQ_CTX)
+
+
+def test_lookup_pass_queries_the_manager_once_per_key():
+    sched = _make_scheduler_with_lookup({1: LookupResult.HIT})
+    lookup = _lookup_pass(sched)
+    [hit, miss] = to_keys([1, 2])
+
+    assert hit not in lookup
+    assert [lookup(hit), lookup(miss), lookup(hit)] == [
+        LookupResult.HIT,
+        LookupResult.MISS,
+        LookupResult.HIT,
+    ]
+    assert hit in lookup
+    assert _as_mock(sched.manager.lookup).call_count == 2
+
+
 def _maximal_lookup(sched, keys, start_chunk_idx: int = 0):
     return sched._maximal_prefix_lookup(
         keys,
-        _EMPTY_REQ_CTX,
+        _lookup_pass(sched),
         _LOOKUP_REQ,
         _LOOKUP_GROUP_CONFIG,
         start_chunk_idx,
@@ -3234,7 +3266,7 @@ def test_scan_behavior_declared_for_every_lookup_result(result: LookupResult):
     keys = to_keys([1, 2, 3])
     sched = _make_scheduler_with_lookup(dict.fromkeys([1, 2, 3], result))
 
-    assert sched._sliding_window_lookup(keys, 1, _EMPTY_REQ_CTX) == expected_end
+    assert sched._sliding_window_lookup(keys, 1, _lookup_pass(sched)) == expected_end
     assert len(_as_mock(sched.manager.lookup).call_args_list) == expected_lookups
 
 
@@ -3253,7 +3285,7 @@ def test_sliding_window_unaligned_initial_run(middle, expected):
     # needs the usual two chunks. Pending/uncertain keys must still defer.
     assert (
         sched._sliding_window_lookup(
-            to_keys([1, 2, 3, 4, 5]), 2, _EMPTY_REQ_CTX, initial_window_size=3
+            to_keys([1, 2, 3, 4, 5]), 2, _lookup_pass(sched), initial_window_size=3
         )
         == expected
     )
@@ -3391,34 +3423,50 @@ class TestSlidingWindowLookup:
             {1: LookupResult.HIT, 2: LookupResult.HIT, 4: LookupResult.HIT_PENDING}
         )
         assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX) == 2
+            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _lookup_pass(sched))
+            == 2
         )
 
     def test_all_hit_exact_window(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) == 2
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2]), 2, _lookup_pass(sched)) == 2
+        )
 
     def test_all_miss(self):
         sched = _make_scheduler_with_lookup({})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 0
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _lookup_pass(sched))
+            == 0
+        )
 
     def test_window_at_end(self):
         sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 2, _EMPTY_REQ_CTX) == 3
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2, 3]), 2, _lookup_pass(sched))
+            == 3
+        )
 
     def test_window_in_middle(self):
         sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
         assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX) == 3
+            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _lookup_pass(sched))
+            == 3
         )
 
     def test_no_full_window_falls_back_to_prefix(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) == 2
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _lookup_pass(sched))
+            == 2
+        )
 
     def test_single_block_window(self):
         sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 3
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _lookup_pass(sched))
+            == 3
+        )
 
     def test_gap_resets_consecutive(self):
         sched = _make_scheduler_with_lookup(
@@ -3426,7 +3474,9 @@ class TestSlidingWindowLookup:
         )
         # [1, 2, 3, 0, 4] — gap at 0 resets, window of 2 found at [2,3]
         assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 0, 4]), 2, _EMPTY_REQ_CTX)
+            sched._sliding_window_lookup(
+                to_keys([1, 2, 3, 0, 4]), 2, _lookup_pass(sched)
+            )
             == 3
         )
 
@@ -3442,7 +3492,9 @@ class TestSlidingWindowLookup:
         # two valid windows: [1,2] at positions 0-1 and [4,5] at positions 3-4
         # scans right-to-left, finds [4,5] first
         assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 4, 5]), 2, _EMPTY_REQ_CTX)
+            sched._sliding_window_lookup(
+                to_keys([1, 2, 3, 4, 5]), 2, _lookup_pass(sched)
+            )
             == 5
         )
 
@@ -3457,19 +3509,24 @@ class TestSlidingWindowLookup:
         )
         # window of 4 not found contiguously (gap at 1)
         assert (
-            sched._sliding_window_lookup(to_keys([2, 1, 3, 4, 5]), 4, _EMPTY_REQ_CTX)
+            sched._sliding_window_lookup(
+                to_keys([2, 1, 3, 4, 5]), 4, _lookup_pass(sched)
+            )
             == 1
         )
 
     def test_empty(self):
         sched = _make_scheduler_with_lookup({})
-        assert sched._sliding_window_lookup([], 1, _EMPTY_REQ_CTX) == 0
+        assert sched._sliding_window_lookup([], 1, _lookup_pass(sched)) == 0
 
     def test_retry_defers(self):
         sched = _make_scheduler_with_lookup(
             {1: LookupResult.HIT, 2: LookupResult.RETRY}
         )
-        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2]), 2, _lookup_pass(sched))
+            is None
+        )
 
     def test_retry_with_full_window_still_defers(self):
         """Even if a real window is found after a RETRY, result is deferred."""
@@ -3484,7 +3541,7 @@ class TestSlidingWindowLookup:
             }
         )
         assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX)
+            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _lookup_pass(sched))
             is None
         )
 
@@ -3494,7 +3551,10 @@ class TestSlidingWindowLookup:
             {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING}
         )
         # window=2: both count as hits, but defer_lookup is set
-        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2]), 2, _lookup_pass(sched))
+            is None
+        )
 
     def test_hit_pending_does_not_break_streak(self):
         """HIT_PENDING in the middle of a window doesn't reset the streak."""
@@ -3503,7 +3563,8 @@ class TestSlidingWindowLookup:
         )
         # window=3: right-to-left finds 3(HIT),2(HIT_PENDING),1(HIT) = 3 consecutive
         assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) is None
+            sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _lookup_pass(sched))
+            is None
         )
 
 
@@ -3602,7 +3663,7 @@ def test_sliding_window_demand_is_store_reachable(
         {i: LookupResult.HIT_PENDING for i in range(storable_chunk_count)}
     )
     sched._sliding_window_lookup(
-        to_keys(range(storable_chunk_count)), required_window, _EMPTY_REQ_CTX
+        to_keys(range(storable_chunk_count)), required_window, _lookup_pass(sched)
     )
 
     demanded = {
@@ -4641,7 +4702,7 @@ def _demanded_keys(runner, offload_keys_per_group: list[list], num_tokens: int) 
         if window is None:
             _maximal_lookup(scan, keys)
         else:
-            scan._sliding_window_lookup(keys, window, _EMPTY_REQ_CTX)
+            scan._sliding_window_lookup(keys, window, _lookup_pass(scan))
     return {
         lookup_call.args[0]
         for lookup_call in _as_mock(scan.manager.lookup).call_args_list

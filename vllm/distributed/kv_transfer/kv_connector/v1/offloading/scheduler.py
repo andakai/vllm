@@ -298,7 +298,6 @@ class RequestGroupState:
     # Number of offloaded chunks hit (including GPU prefix cache)
     # when the request first started
     num_hit_chunks: int = 0
-    lookup_hit_end_chunk_idx: int = 0
 
 
 @dataclass(slots=True)
@@ -526,6 +525,30 @@ def _create_req_context(
     )
 
 
+class _LookupPass:
+    """Primary-tier lookups for one request lookup, at most one per key.
+
+    The complete-chunk convergence and the partial-tail search revisit keys.
+    Reusing the first result keeps manager lookups, and the async work they
+    start in secondary tiers, to the distinct keys a request needs.
+    """
+
+    def __init__(self, manager: OffloadingManager, req_context: ReqContext) -> None:
+        self._manager = manager
+        self._req_context = req_context
+        self._results: dict[OffloadKey, LookupResult] = {}
+
+    def __contains__(self, key: OffloadKey) -> bool:
+        return key in self._results
+
+    def __call__(self, key: OffloadKey) -> LookupResult:
+        result = self._results.get(key)
+        if result is None:
+            result = self._manager.lookup(key, self._req_context)
+            self._results[key] = result
+        return result
+
+
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
@@ -732,7 +755,7 @@ class OffloadingConnectorScheduler:
     def _maximal_prefix_lookup(
         self,
         keys: Iterable[OffloadKey],
-        req_context: ReqContext,
+        lookup: _LookupPass,
         req: Request,
         group_config: GroupOffloadConfig,
         start_chunk_idx: int,
@@ -742,7 +765,7 @@ class OffloadingConnectorScheduler:
         hit_count = 0
         defer_lookup = False
         for local_idx, key in enumerate(keys):
-            result = self.manager.lookup(key, req_context)
+            result = lookup(key)
             match result:
                 case LookupResult.HIT | LookupResult.HIT_PENDING:
                     self._events_tracker.record_lookup(
@@ -765,7 +788,7 @@ class OffloadingConnectorScheduler:
         self,
         keys: Sequence[OffloadKey],
         sliding_window_size: int,
-        req_context: ReqContext,
+        lookup: _LookupPass,
         initial_window_size: int | None = None,
     ) -> int | None:
         """Return the end index (in `keys`) of the last run of
@@ -777,7 +800,7 @@ class OffloadingConnectorScheduler:
         consecutive_hits = 0
         required_window = initial_window_size or sliding_window_size
         for idx in range(len(keys) - 1, -1, -1):
-            match self.manager.lookup(keys[idx], req_context):
+            match lookup(keys[idx]):
                 case LookupResult.HIT:
                     consecutive_hits += 1
                 case LookupResult.HIT_PENDING:
@@ -808,6 +831,7 @@ class OffloadingConnectorScheduler:
     def _lookup_complete_chunks(
         self,
         req_status: RequestOffloadState,
+        lookup: _LookupPass,
         max_num_new_tokens: int | None = None,
     ) -> tuple[int | None, int | None]:
         """Find how many tokens beyond num_locally_computed_tokens can be loaded.
@@ -846,8 +870,6 @@ class OffloadingConnectorScheduler:
         num_hit_tokens: int = 0
         defer_lookup = False
         lookup_groups = self._lookup_groups
-        for state in req_status.group_states:
-            state.lookup_hit_end_chunk_idx = 0
 
         full_attention_hit_boundary: int | None = None
         while lookup_groups:
@@ -905,13 +927,10 @@ class OffloadingConnectorScheduler:
                 if sliding_window_size_in_chunks is None:
                     num_hit_chunks = self._maximal_prefix_lookup(
                         offload_keys,
-                        req_status.req_context,
+                        lookup,
                         req_status.req,
                         group_config,
                         start_chunk_idx,
-                    )
-                    group_state.lookup_hit_end_chunk_idx = start_chunk_idx + (
-                        num_hit_chunks or 0
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
@@ -926,7 +945,7 @@ class OffloadingConnectorScheduler:
                     num_hit_chunks = self._sliding_window_lookup(
                         offload_keys,
                         required_window,
-                        req_status.req_context,
+                        lookup,
                         initial_window,
                     )
                 if num_hit_chunks == 0:
@@ -1018,11 +1037,16 @@ class OffloadingConnectorScheduler:
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
     ) -> int | None:
+        lookup = _LookupPass(self.manager, req_status.req_context)
         complete_hit, full_attention_hit_boundary = self._lookup_complete_chunks(
-            req_status, max_num_new_tokens
+            req_status, lookup, max_num_new_tokens
         )
         num_hit_tokens = self._lookup_partial_tail_hit(
-            req_status, complete_hit, full_attention_hit_boundary, max_num_new_tokens
+            req_status,
+            lookup,
+            complete_hit,
+            full_attention_hit_boundary,
+            max_num_new_tokens,
         )
         if num_hit_tokens is not None and full_attention_hit_boundary is not None:
             self._maybe_register_shared_prefix_junction(
@@ -1033,6 +1057,7 @@ class OffloadingConnectorScheduler:
     def _lookup_partial_tail_hit(
         self,
         req_status: RequestOffloadState,
+        lookup: _LookupPass,
         complete_hit: int | None,
         full_attention_hit_boundary: int | None,
         max_num_new_tokens: int | None,
@@ -1084,10 +1109,12 @@ class OffloadingConnectorScheduler:
         # index.
         bridge_chunk_idx = anchor_boundary // block_size
         bridge_boundary = (bridge_chunk_idx + 1) * block_size
-        # Bridge keys that the complete-chunk lookup did not confirm.
-        unconfirmed_bridge_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
+        # Bridge keys that the complete-chunk lookup did not reach. It recorded
+        # the lookup events of the keys it confirmed.
+        new_bridge_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
         pending = anchor_pending
         if max_boundary >= bridge_boundary:
+            bridge_keys: list[OffloadKey] = []
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
@@ -1095,10 +1122,11 @@ class OffloadingConnectorScheduler:
                     continue
                 key = group_state.offload_keys[bridge_chunk_idx]
                 pending |= key in (self._chunks_being_loaded or ())
-                if group_state.lookup_hit_end_chunk_idx <= bridge_chunk_idx:
-                    unconfirmed_bridge_keys.append((group_config, key))
-            for _, key in unconfirmed_bridge_keys:
-                result = self.manager.lookup(key, req_status.req_context)
+                if key not in lookup:
+                    new_bridge_keys.append((group_config, key))
+                bridge_keys.append(key)
+            for key in bridge_keys:
+                result = lookup(key)
                 if result is LookupResult.MISS:
                     max_boundary = bridge_boundary - tokens_per_hash
                     break
@@ -1112,12 +1140,11 @@ class OffloadingConnectorScheduler:
                 continue
             loads_bridge = boundary >= bridge_boundary
             hit, boundary_pending = self._lookup_partial_tail(
-                req_status, boundary, loads_bridge and bridge_pending
+                req_status, lookup, boundary, loads_bridge and bridge_pending
             )
             if hit:
-                # The complete-chunk lookup recorded the confirmed bridge keys.
                 if loads_bridge:
-                    for group_config, key in unconfirmed_bridge_keys:
+                    for group_config, key in new_bridge_keys:
                         self._events_tracker.record_lookup(
                             req_status.req, group_config, bridge_chunk_idx, key
                         )
@@ -1132,6 +1159,7 @@ class OffloadingConnectorScheduler:
     def _lookup_partial_tail(
         self,
         req_status: RequestOffloadState,
+        lookup: _LookupPass,
         boundary: int,
         bridge_pending: bool,
     ) -> tuple[bool, bool]:
@@ -1155,7 +1183,7 @@ class OffloadingConnectorScheduler:
             # is ready, while its earlier GPU load is still in flight.  Do
             # not schedule the same partial-tail transfer twice.
             pending |= key in (self._chunks_being_loaded or ())
-            result = self.manager.lookup(key, req_context)
+            result = lookup(key)
             if result is LookupResult.MISS:
                 return False, pending
             pending |= result is not LookupResult.HIT
