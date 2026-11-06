@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     GroupOffloadConfig,
     OffloadingConnectorScheduler,
+    _LookupPass,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
@@ -700,7 +701,7 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
-            scheduler, [key], ctx, req, group, 0
+            scheduler, [key], _LookupPass(primary, ctx), req, group, 0
         )
         is None
     )
@@ -754,7 +755,7 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
-            scheduler, [failed_key], ctx, failed_req, group, 0
+            scheduler, [failed_key], _LookupPass(primary, ctx), failed_req, group, 0
         )
         is None
     )
@@ -778,7 +779,7 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
         primary.prepare_store([key], ctx)
         assert (
             OffloadingConnectorScheduler._maximal_prefix_lookup(
-                scheduler, [key], ctx, req, group, 0
+                scheduler, [key], _LookupPass(primary, ctx), req, group, 0
             )
             is None
         )
