@@ -639,11 +639,7 @@ class VllmConfig:
     def num_hash_lookahead_tokens(self) -> int:
         """Tokens after each block covered by its hash; zero keeps legacy hashes."""
         speculative_config = self.speculative_config
-        if (
-            speculative_config is None
-            or not speculative_config.use_eagle_block_drop()
-            or speculative_config.disable_lookahead_block_hashes
-        ):
+        if speculative_config is None or not speculative_config.use_hash_lookahead():
             return 0
         # A KV connector uses block hashes even without core prefix caching.
         if (
@@ -651,7 +647,6 @@ class VllmConfig:
             and not self.cache_config.enable_prefix_caching
         ):
             return 0
-        # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
 
     @property
@@ -2314,24 +2309,15 @@ class VllmConfig:
         if (
             self.model_config is not None
             and self.model_config.attention_chunk_size is not None
+            and not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
         ):
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.uses_target_hidden_states
-            ):
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention + eagle.
-                need_disable_hybrid_kv_cache_manager = True
-            elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
-                logger.warning(
-                    "There is a latency regression when using chunked local"
-                    " attention with the hybrid KV cache manager. Disabling"
-                    " it, by default. To enable it, set the environment "
-                    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
-                )
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention.
-                need_disable_hybrid_kv_cache_manager = True
+            logger.warning(
+                "There is a latency regression when using chunked local"
+                " attention with the hybrid KV cache manager. Disabling"
+                " it, by default. To enable it, set the environment "
+                "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+            )
+            need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Auto-disable HMA only when the connector config does not support it.
