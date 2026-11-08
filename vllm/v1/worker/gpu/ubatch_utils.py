@@ -413,7 +413,12 @@ class UBatchRunner:
                 )
             )
             slot_mappings_by_layer.append(
-                build_slot_mappings_by_layer(ubatch_slot_mappings, self.kv_cache_config)
+                build_slot_mappings_by_layer(
+                    ubatch_slot_mappings,
+                    self.kv_cache_config,
+                    self.attn_groups,
+                    ubatch_idx=i,
+                )
             )
             is_padding.append(ubatch.is_padding)
 

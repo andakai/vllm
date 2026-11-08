@@ -419,7 +419,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             kv_cache_config = self.kv_cache_config
             assert kv_cache_config is not None
             prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
+                slot_mappings, self.kv_cache_config, self.attn_groups
             )
             if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
                 assert self.prefill_cudagraph_manager is not None

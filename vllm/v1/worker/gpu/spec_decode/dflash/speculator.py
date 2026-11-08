@@ -285,6 +285,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             dtype=torch.int64,
             device=self.device,
         )
+        self._kernel_context_slot_mappings = torch.zeros_like(
+            self._context_slot_mappings
+        )
 
         # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
         # of the kv-cache group its cache belongs to. Models that share a single group
@@ -383,16 +386,26 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
             context_slots = [
-                self._context_slot_mappings[gidx][start:end]
+                self._kernel_context_slots(gidx, start, end)
                 for gidx in self._layer_group_idx
             ]
         else:
-            context_slots = self._context_slot_mappings[0][start:end]
+            context_slots = self._kernel_context_slots(0, start, end)
         self.model.precompute_and_store_context_kv(
             self.hidden_states[start:end],
             self.context_positions[start:end],
             context_slots,
         )
+
+    def _kernel_context_slots(self, i: int, start: int, end: int) -> torch.Tensor:
+        """Context slots of draft group ``i``, in kernel blocks when its cache is
+        a packed token cache split into them. Recorded in FULL graphs as well."""
+        slots = self._context_slot_mappings[i][start:end]
+        for group in self.attn_groups[self.draft_kv_cache_group_ids[i]]:
+            if group.kernel_slot_mapping is not None:
+                out = self._kernel_context_slot_mappings[i][start:end]
+                return group.map_to_kernel_slot_mapping(slots, out=out)
+        return slots
 
     def _store_hidden_states(
         self,
@@ -616,6 +629,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         else:
             self._map_kernel_block_tables()
+            self._map_kernel_slot_mappings(num_tokens_padded)
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
@@ -628,6 +642,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
                 self.block_tables.slot_mappings[:, :num_tokens_padded],
                 self.kv_cache_config,
+                self.attn_groups,
             )
             self._generate_draft(
                 num_reqs,

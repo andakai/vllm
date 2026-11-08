@@ -459,13 +459,28 @@ def bind_kv_caches(
 
 
 def build_slot_mappings_by_layer(
-    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
+    slot_mappings: torch.Tensor,
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+    ubatch_idx: int = 0,
 ) -> dict[str, torch.Tensor]:
+    """Per-layer slot mappings. Token caches split into the kernel blocks of a
+    packed cache get their group's mapped slots, so every runner writes them at
+    the slots the group's metadata reads."""
     slot_mappings_by_layer: dict[str, torch.Tensor] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
-    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
+    assert len(attn_groups) == len(kv_cache_groups)
+    for slot_mapping, kv_cache_group, groups in zip(
+        slot_mappings, kv_cache_groups, attn_groups
+    ):
         for layer_name in kv_cache_group.layer_names:
             slot_mappings_by_layer[layer_name] = slot_mapping
+        for attn_group in groups:
+            if attn_group.kernel_slot_mapping is None:
+                continue
+            mapped = attn_group.map_to_kernel_slot_mapping(slot_mapping, ubatch_idx)
+            for layer_name in attn_group.layer_names:
+                slot_mappings_by_layer[layer_name] = mapped
     return slot_mappings_by_layer
 
 

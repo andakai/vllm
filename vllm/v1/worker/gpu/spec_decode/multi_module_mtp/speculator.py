@@ -241,7 +241,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 num_reqs,
             )
             slot_mappings = build_slot_mappings_by_layer(
-                slot_mappings_tensor, self.kv_cache_config
+                slot_mappings_tensor, self.kv_cache_config, self.attn_groups
             )
             draft_attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,

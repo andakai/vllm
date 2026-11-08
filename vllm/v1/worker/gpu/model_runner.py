@@ -2011,7 +2011,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
+                slot_mappings, self.kv_cache_config, self.attn_groups
             )
             assert block_tables is not None
             attn_groups = self.attn_groups
