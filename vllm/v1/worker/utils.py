@@ -285,9 +285,9 @@ class AttentionGroup:
     # Persistent per ubatch: CUDA graphs capture the mapped block table.
     kernel_block_table: torch.Tensor | None = None
     kernel_block_offsets: torch.Tensor | None = None
-    # Set by runners that also map token caches' slot mappings to kernel blocks
-    # (map_to_kernel_slot_mapping), which lets packed token caches split.
-    maps_slot_mapping: bool = False
+    # Persistent per ubatch: the slot mapping of a token cache split into kernel
+    # blocks whose builder does not derive its slots from the block table
+    # (map_to_kernel_slot_mapping).
     kernel_slot_mapping: torch.Tensor | None = None
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistent buffers for cudagraphs, and they
@@ -342,7 +342,10 @@ class AttentionGroup:
                 dtype=torch.int32,
                 device=device,
             )
-            if self.maps_slot_mapping and spec.tokens_per_state <= 1:
+            if (
+                spec.tokens_per_state <= 1
+                and not self.backend.writes_kv_cache_from_block_table()
+            ):
                 self.kernel_slot_mapping = torch.zeros(
                     num_metadata_builders,
                     vllm_config.scheduler_config.max_num_batched_tokens,
@@ -456,15 +459,13 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
-        # Token caches are written through manager-block slot mappings, so only
-        # caches written from their block table (compressed ones, or as their
-        # backend declares) or whose slot mappings are mapped too
-        # (maps_slot_mapping) can be mapped.
+        # A token cache's writes must land in kernel blocks too: its builder
+        # derives them from the block table, or this group maps its slots.
         if (
             (
                 spec.tokens_per_state <= 1
                 and not self.backend.writes_kv_cache_from_block_table()
-                and not self.maps_slot_mapping
+                and self.kernel_slot_mapping is None
             )
             or kv_cache.shape[1] != 1
             or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))

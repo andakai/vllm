@@ -913,7 +913,7 @@ def prepare_inputs_to_capture(
         slot_mappings_buffer.fill_(PAD_SLOT_ID)
         slot_mappings = slot_mappings_buffer[:, :num_tokens]
     slot_mappings_by_layer = build_slot_mappings_by_layer(
-        slot_mappings, kv_cache_config
+        slot_mappings, kv_cache_config, attn_groups
     )
 
     if block_tables.cp_size > 1:

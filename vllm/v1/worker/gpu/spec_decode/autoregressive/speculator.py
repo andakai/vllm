@@ -246,7 +246,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     batch_desc.num_tokens,
                 )
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
-                    slot_mappings, self.kv_cache_config
+                    slot_mappings, self.kv_cache_config, self.attn_groups
                 )
                 attn_metadata = self._build_uniform_attn_metadata(
                     num_reqs=num_reqs,
@@ -296,7 +296,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 batch_desc.num_tokens,
             )
             slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
+                slot_mappings, self.kv_cache_config, self.attn_groups
             )
             attn_metadata = self._build_uniform_attn_metadata(
                 batch_desc=batch_desc,
@@ -340,6 +340,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     positions,
                     num_tokens_padded,
                 )
+                # The step's slots, written in place: map them into the buffers
+                # the captured metadata and slot mappings read.
+                self._map_kernel_slot_mappings(num_tokens_padded)
                 self._update_draft_decode_metadata(attn_metadata, num_reqs)
 
             self.current_draft_step.fill_(step)
