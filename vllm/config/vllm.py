@@ -646,16 +646,11 @@ class VllmConfig:
             or speculative_config.disable_lookahead_block_hashes
         ):
             return 0
-        kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is not None:
-            from vllm.distributed.kv_transfer.kv_connector.factory import (
-                KVConnectorFactory,
-            )
-
-            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
-            if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
-                return 0
-        elif not self.cache_config.enable_prefix_caching:
+        # A KV connector uses block hashes even without core prefix caching.
+        if (
+            self.kv_transfer_config is None
+            and not self.cache_config.enable_prefix_caching
+        ):
             return 0
         # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
