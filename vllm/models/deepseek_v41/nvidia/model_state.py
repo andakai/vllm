@@ -639,7 +639,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 cudagraph_runtime_mode=cg_mode,
                 batch_descriptor=BatchDescriptor(num_tokens=num_padded),
                 slot_mapping=build_slot_mappings_by_layer(
-                    kept_slot_mappings, kv_cache_config
+                    kept_slot_mappings, kv_cache_config, attn_groups
                 ),
             ),
             run_graph,

@@ -969,24 +969,27 @@ def test_packed_token_cache_written_from_block_table_is_split():
     table = group.build_metadata(metadata)
 
     assert group.get_metadata_builder().kv_cache_spec.block_size == 64
+    assert group.kernel_slot_mapping is None
     second_block = pages[table[0, 16:], 0].flatten(0, 1)
     assert torch.equal(second_block, manager[2, 0])
 
 
-def test_packed_token_cache_cannot_be_split():
+def test_packed_cache_unaligned_to_kernel_blocks_cannot_be_split():
+    """Packed blocks that do not start on a kernel block boundary have no
+    kernel-block view."""
     group = _packed_group(1, 1152, [64])
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-    packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
+    packed = torch.zeros(3, 1, 2050, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
 
 
 def test_packed_token_cache_splits_with_mapped_slots():
-    """A runner that maps slots too can split a packed token cache: slot
-    b * block_size + t is written to the row block b's offset t is read from."""
+    """A packed token cache written through slot mappings is split, and its
+    group maps the slots: slot b * block_size + t is written to the row block
+    b's offset t is read from."""
     row, stride_rows = 8, 1280  # other layers' pages sit between blocks
     group = _packed_group(1, row, [64])
-    group.maps_slot_mapping = True
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
     backing = torch.arange(3 * stride_rows).repeat_interleave(row)
     manager = backing.view(3, 1, stride_rows, row)[:, :, :1024]
@@ -1005,7 +1008,6 @@ def test_kernel_slot_mapping_cuda_matches_torch():
     (negative) slots included."""
     row, stride_rows = 8, 1280
     group = _packed_group(1, row, [64])
-    group.maps_slot_mapping = True
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
     manager = torch.zeros(3 * stride_rows, 1, row).view(3, 1, stride_rows, row)
     map_kv_caches_to_kernel_blocks({"layer.0": manager[:, :, :1024]}, [group])

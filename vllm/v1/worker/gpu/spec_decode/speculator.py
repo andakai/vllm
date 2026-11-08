@@ -148,10 +148,6 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
-    # Whether every slot mapping the speculator builds goes through its attention
-    # groups' map_to_kernel_slot_mapping, so packed token caches may split.
-    maps_slot_mapping = False
-
     # Draft prefill runs on the target's batch, so it can reuse the target
     # forward's attention metadata. Otherwise the drafter rebuilds it.
     can_reuse_target_attn_metadata: bool = True
@@ -397,7 +393,6 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
-            maps_slot_mapping=self.maps_slot_mapping,
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
@@ -440,7 +435,7 @@ class DraftModelSpeculator(BaseSpeculator):
             for_capture=for_capture,
         )
         return attn_metadata, build_slot_mappings_by_layer(
-            target_slot_mappings, self.kv_cache_config
+            target_slot_mappings, self.kv_cache_config, self.attn_groups
         )
 
     def _configure_decode_metadata_update(self) -> None:
@@ -775,4 +770,16 @@ class DraftModelSpeculator(BaseSpeculator):
             for group in groups:
                 group.map_to_kernel_block_table(
                     self.block_tables.input_block_tables[group.kv_cache_group_id]
+                )
+
+    def _map_kernel_slot_mappings(self, num_tokens: int) -> None:
+        """Refresh the persistent kernel-block slot mappings of packed token
+        caches from ``block_tables.slot_mappings``, for steps that reuse
+        captured metadata instead of rebuilding it."""
+        for groups in self.attn_groups:
+            for group in groups:
+                group.map_to_kernel_slot_mapping(
+                    self.block_tables.slot_mappings[
+                        group.kv_cache_group_id, :num_tokens
+                    ]
                 )

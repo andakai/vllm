@@ -37,7 +37,6 @@ logger = init_logger(__name__)
 
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
-    maps_slot_mapping = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
@@ -592,13 +591,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_padded = batch_desc.num_tokens
-        # Packed token caches split into kernel blocks: the query slots the FULL
-        # graph reads live in each group's persistent mapped buffer.
-        for gid in self.draft_kv_cache_group_ids:
-            for group in self.attn_groups[gid]:
-                group.map_to_kernel_slot_mapping(
-                    self.block_tables.slot_mappings[gid, :num_tokens_padded]
-                )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
@@ -637,6 +629,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         else:
             self._map_kernel_block_tables()
+            self._map_kernel_slot_mappings(num_tokens_padded)
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
