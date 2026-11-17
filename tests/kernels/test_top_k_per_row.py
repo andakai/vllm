@@ -2547,6 +2547,35 @@ def test_deep_select_topk(
 
 
 @requires_sm100
+@pytest.mark.parametrize("nan_frac", [0.001, 0.3, 1.0])
+@pytest.mark.parametrize("with_end", [True, False])
+@torch.inference_mode()
+def test_deep_select_topk_nan_logits_stay_in_range(
+    nan_frac: float, with_end: bool
+) -> None:
+    """NaN inside a row (dummy runs over uninitialized KV) must not leave
+    out-of-range indices: everything is either -1 or inside [0, end)."""
+    from vllm.model_executor.layers import indexer_topk
+
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    batch_size, vocab_size, top_k = 96, 65536, 2048
+    logits = torch.randn(batch_size, vocab_size, dtype=torch.float32)
+    logits[torch.rand(batch_size, vocab_size) < nan_frac] = float("nan")
+    row_ends = torch.randint(
+        top_k // 2, vocab_size + 1, (batch_size,), dtype=torch.int32
+    )
+
+    end = row_ends if with_end else None
+    indices = indexer_topk.deep_select_topk(logits, top_k, end=end)
+    torch.accelerator.synchronize()
+
+    bound = row_ends[:, None] if with_end else vocab_size
+    assert torch.all((indices == -1) | ((indices >= 0) & (indices < bound)))
+
+
+@requires_sm100
 @torch.inference_mode()
 def test_deep_select_topk_preallocated_output() -> None:
     """DeepSelect writes into a preallocated aligned buffer (no `end`)."""

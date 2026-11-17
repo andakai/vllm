@@ -133,6 +133,13 @@ def deep_select_topk(
         # logits from uninitialized KV cache; the reference topk kernels do
         # not trap on NaN, and trapping would abort CUDA graph capture.
     )
+    # With NaN in a row DeepSelect can leave out-of-range garbage in the
+    # selected slots (the dummy and profiling passes read uninitialized KV),
+    # which the sparse attention would then dereference. Map anything outside
+    # [0, end) to the -1 "no token" sentinel.
+    out = output_idx[:num_rows, :topk]
+    bound = end[:num_rows, None] if end is not None else input.shape[1]
+    out.masked_fill_((out < 0) | (out >= bound), IDX_OOB_FILL_VALUE)
     return output_idx
 
 
