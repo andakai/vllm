@@ -182,13 +182,16 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
                 x.view(-1, K), is_sf_swizzled_layout=True
             )
 
+        # Up to 8 rows the low-latency kernel beats the autotuned CuTe-DSL
+        # tactics on most DSv4.1 TP4 projections (0.7-1.6 us, L2-cold).
+        small = input_mxfp8.shape[0] <= 8 and K % 128 == 0
         output = vllm_flashinfer.mm_mxfp8(
             input_mxfp8,
             weight,
             input_scale,
             weight_scale,
             out_dtype=out_dtype,
-            backend="cute-dsl",
+            backend="cutedsl_low_latency" if small else "cute-dsl",
         )
 
         if bias is not None:
