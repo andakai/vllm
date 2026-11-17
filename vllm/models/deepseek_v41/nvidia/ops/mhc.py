@@ -309,11 +309,34 @@ def mhc_pre_delayed_ampere(
     )
 
 
+def _moe_leaves_tp_partial(vllm_config: VllmConfig) -> bool:
+    """Whether an expert-parallel MoE ends, as a TP one does, in the TP
+    group's all-reduce of a partial sum, which a boundary may then take: TEP
+    (TP with expert parallelism) on one node without data or prefill context
+    parallelism, where the EP group is the TP group and every rank runs its
+    experts on all of the step's tokens. Data or context parallelism (which
+    elastic EP may add at runtime), or a MegaMoE backend, make the MoE
+    dispatch and combine across ranks or shard the tokens (sequence
+    parallelism) instead, and its output is no TP partial."""
+    from vllm.config.kernel import MEGA_MOE_BACKENDS
+    from vllm.distributed.parallel_state import get_node_count
+
+    parallel = vllm_config.parallel_config
+    return (
+        parallel.data_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and not parallel.enable_elastic_ep
+        and vllm_config.kernel_config.moe_backend not in MEGA_MOE_BACKENDS
+        and get_node_count() == 1
+    )
+
+
 def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
     """Whether the mHC boundaries fuse the TP all-reduce (`AllReduceMHC`):
     at TP4 on SM100, whose overlap path it serves, and at TP8 on SM90, where
     the boundaries of the SM80 kernels' path take it; both need NVLink
-    multicast."""
+    multicast. SM100 fuses it under TEP too, where the MoE's output is a TP
+    partial as without expert parallelism (`_moe_leaves_tp_partial`)."""
     parallel = vllm_config.parallel_config
     config = vllm_config.model_config.hf_config
     if current_platform.is_device_capability(90):
@@ -324,9 +347,12 @@ def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
         return False
     if (
         parallel.tensor_parallel_size != tp_size
-        or parallel.enable_expert_parallel
         or config.hidden_size != 5120
         or config.hc_mult != 4
+    ):
+        return False
+    if parallel.enable_expert_parallel and (
+        tp_size != 4 or not _moe_leaves_tp_partial(vllm_config)
     ):
         return False
     # The custom all-reduce's MNNVL buffers succeed exactly when NVLink

@@ -1051,6 +1051,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.column_gathers = supports_column_gathers(vllm_config)
         if self.column_gathers:
             self._init_engram_column_gathers(vllm_config)
+        if self.fuse_mhc_all_reduce and self.parallel_config.enable_expert_parallel:
+            # Under TEP the boundaries all-reduce the MoE output over TP, as
+            # without EP: it must be the partial sum the MoE leaves unreduced
+            # (no all-to-all combine, sequence parallelism or reduced finalize),
+            # or the boundary would sum it twice. Its experts finalize their
+            # own top-k: the deferred finalize takes TP-only MoEs.
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                assert isinstance(layer, DeepseekV4DecoderLayer)
+                assert layer.ffn.experts.moe_config.skip_final_all_reduce, (
+                    "DSV4.1 mHC: the fused all-reduce under expert parallelism "
+                    "needs an MoE that leaves its TP all-reduce to the caller."
+                )
+            logger.info_once(
+                "DSV4.1 mHC: expert-parallel MoE and attention leave their TP "
+                "all-reduce to the mHC boundaries (TEP)."
+            )
         if self.fuse_mhc_all_reduce and vllm_config.lora_config is None:
             # A MoE's top-k finalize folds into the next layer's first mHC
             # boundary, which the last local layer lacks and an engram layer
