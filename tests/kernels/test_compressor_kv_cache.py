@@ -338,6 +338,7 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
         kv_mxfp8=kv_mxfp8,
         accepts_unnormed_unroped_query=False,
         _pads_q_by_copy=False,
+        _pads_q_into_shared_buffer=False,
         n_local_heads=num_heads,
         padded_heads=num_heads,
         eps=1e-20,

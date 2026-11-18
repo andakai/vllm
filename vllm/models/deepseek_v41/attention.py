@@ -110,6 +110,20 @@ _SHARD_FUSED_WQA_WKV_MIN_TOKENS = 2048
 # large-step win without betting on launch overlap.
 _Q_PAD_COPY_MIN_TOKENS = 2048
 
+# Above this many tokens, a layer with _pads_q_into_shared_buffer set copies its
+# live Q heads into the shared zeroed buffer instead of having the fused
+# KV-insert op write all padded heads. At or below it, the one fused launch wins.
+_FUSED_Q_PAD_MAX_TOKENS = 64
+
+# One zeroed padded-Q buffer per (device, dtype, live heads, padded heads, head
+# dim), shared by every layer that pads into it. Each layer rewrites only its
+# live slots, so the padding slots stay zero; the layers run one after another
+# on one stream. Allocated once and never replaced, so captured CUDA graphs
+# keep a valid address.
+_shared_padded_q_buffers: dict[
+    tuple[torch.device, torch.dtype, int, int, int], torch.Tensor
+] = {}
+
 
 @triton.jit
 def _pad_interleaved_q_kernel(
@@ -119,8 +133,10 @@ def _pad_interleaved_q_kernel(
     LIVE: tl.constexpr,
     PAD: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
+    ZERO_PAD: tl.constexpr,
 ):
-    # One row per (token, 16-dim chunk): LIVE copied elements, then PAD zeros.
+    # One row per (token, 16-dim chunk): LIVE copied elements, then PAD zeros
+    # (left untouched without ZERO_PAD).
     pid = tl.program_id(0)
     rows = pid.to(tl.int64) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS).to(tl.int64)
     row_mask = rows[:, None] < num_rows
@@ -128,12 +144,13 @@ def _pad_interleaved_q_kernel(
     x = tl.load(q_ptr + rows[:, None] * LIVE + cols[None, :], mask=row_mask)
     out_rows = out_ptr + rows[:, None] * (LIVE + PAD)
     tl.store(out_rows + cols[None, :], x, mask=row_mask)
-    pad_cols = tl.arange(0, PAD)
-    tl.store(
-        out_rows + LIVE + pad_cols[None, :],
-        tl.zeros([BLOCK_ROWS, PAD], dtype=x.dtype),
-        mask=row_mask,
-    )
+    if ZERO_PAD:
+        pad_cols = tl.arange(0, PAD)
+        tl.store(
+            out_rows + LIVE + pad_cols[None, :],
+            tl.zeros([BLOCK_ROWS, PAD], dtype=x.dtype),
+            mask=row_mask,
+        )
 
 
 def _pad_interleaved_q_warmup_inputs(
@@ -142,10 +159,12 @@ def _pad_interleaved_q_warmup_inputs(
     padded_heads: int,
     head_dim: int,
     dtype: torch.dtype,
+    zero_pad: bool = True,
 ) -> dict[str, object]:
     return dict(
         q=TritonWarmupTensor(dtype, shape=(1, live_heads, head_dim)),
         out=TritonWarmupTensor(dtype, shape=(1, padded_heads, head_dim)),
+        zero_pad=zero_pad,
     )
 
 
@@ -153,25 +172,32 @@ def _pad_interleaved_q_warmup_inputs(
     kernel=_pad_interleaved_q_kernel,
     warmup_inputs=_pad_interleaved_q_warmup_inputs,
 )
-def _pad_interleaved_q(q: torch.Tensor, out: torch.Tensor) -> DispatchSpec:
+def _pad_interleaved_q(
+    q: torch.Tensor, out: torch.Tensor, zero_pad: bool = True
+) -> DispatchSpec:
     """Copy chunk-interleaved `q` [N, H, D] into `out` [N, HP, D].
 
     Writes the fused KV-insert op's interleaved Q layout: in each 16-dim chunk,
     the H live heads copied bit for bit, then +0.0 in the HP - H padding slots.
-    Both tensors are dense and share a dtype; `16 * H` and `16 * (HP - H)`
-    must be powers of two.
+    Without `zero_pad` the padding slots are not written, for an `out` whose
+    padding is already zero. Both tensors are dense and share a dtype;
+    `16 * H` and, with `zero_pad`, `16 * (HP - H)` must be powers of two.
     """
     num_tokens, live_heads, head_dim = q.shape
     padded_heads = out.shape[1]
     assert out.shape == (num_tokens, padded_heads, head_dim) and out.dtype == q.dtype
-    num_rows = num_tokens * (head_dim // Q_CHUNK)
-    block_rows = 4
+    num_chunks = head_dim // Q_CHUNK
+    num_rows = num_tokens * num_chunks
+    # Without the pad, one program per token: a contiguous read of its live
+    # heads, scattered into one row per chunk.
+    block_rows, num_warps = (4, 4) if zero_pad else (num_chunks, 8)
     return (triton.cdiv(num_rows, block_rows),), dict(
         num_rows=num_rows,
         LIVE=live_heads * Q_CHUNK,
         PAD=(padded_heads - live_heads) * Q_CHUNK,
         BLOCK_ROWS=block_rows,
-        num_warps=4,
+        ZERO_PAD=zero_pad,
+        num_warps=num_warps,
     )
 
 
@@ -709,6 +735,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             and self.padded_heads == 64
             and self.max_num_batched_tokens >= _Q_PAD_COPY_MIN_TOKENS
         )
+        # 16 live heads of 64 (e.g. TP4 of a 64-head model): above
+        # _FUSED_Q_PAD_MAX_TOKENS the fused op would write 3/4 zeros, so the
+        # layer copies its live heads into the shared zeroed buffer instead,
+        # in captured graphs too. Microbatches could interleave two layers in
+        # that buffer, so microbatching keeps the fused pad.
+        self._pads_q_into_shared_buffer = (
+            self.accepts_unnormed_unroped_query
+            and self.n_local_heads == 16
+            and self.padded_heads == 64
+            and not vllm_config.parallel_config.use_ubatching
+        )
 
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -722,12 +759,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 block_size=self.swa_cache_layer.block_size,
             )
 
-            if self._pads_q_by_copy:
+            if self._pads_q_by_copy or self._pads_q_into_shared_buffer:
                 _pad_interleaved_q.register_warmup(
                     live_heads=self.n_local_heads,
                     padded_heads=self.padded_heads,
                     head_dim=self.head_dim,
                     dtype=vllm_config.model_config.dtype,
+                    zero_pad=self._pads_q_by_copy,
                 )
 
             if self.compress_ratio > 1:
@@ -1129,6 +1167,26 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # ([num_tokens, padded_heads, head_dim]).
         self.forward_mqa(q, kv, positions, out)
 
+    def _shared_padded_q(self, q: torch.Tensor) -> torch.Tensor | None:
+        """A `[num_tokens, padded_heads, head_dim]` view of the shared zeroed
+        padded-Q buffer for `q`, or None when the buffer cannot hold it.
+
+        The buffer holds `max_num_batched_tokens` rows. It is allocated on
+        the first call outside CUDA graph capture -- the profile run -- and
+        never replaced, so a graph that captured it stays valid.
+        """
+        num_tokens, live_heads, head_dim = q.shape
+        key = (q.device, q.dtype, live_heads, self.padded_heads, head_dim)
+        buf = _shared_padded_q_buffers.get(key)
+        if buf is None:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            buf = q.new_zeros(
+                (self.max_num_batched_tokens, self.padded_heads, head_dim)
+            )
+            _shared_padded_q_buffers[key] = buf
+        return buf[:num_tokens] if num_tokens <= buf.shape[0] else None
+
     def _fused_qnorm_rope_kv_insert(
         self,
         q: torch.Tensor,
@@ -1145,7 +1203,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         chunk-interleaved layout, so the Q half of the launch is a zero-pad to
         `padded_heads` -- and nothing at all once the shard is that wide.
         On large eager steps of a `_pads_q_by_copy` layer, a KV-only launch
-        leaves that pad to `_pad_interleaved_q`.
+        leaves that pad to `_pad_interleaved_q`; on large steps of a
+        `_pads_q_into_shared_buffer` layer, the live heads go into the shared
+        buffer whose padding is already zero.
         """
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so
@@ -1155,7 +1215,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             if self.accepts_unnormed_unroped_query:
                 # Padding heads sit at the tail of every head-dim chunk in
                 # that layout, so no head-major pad of `q` reproduces it --
-                # and nothing reads it on a profile run.
+                # and nothing reads it on a profile run. Allocating the shared
+                # buffer here has the memory profiler count it.
+                shared_q = (
+                    self._shared_padded_q(q)
+                    if self._pads_q_into_shared_buffer
+                    else None
+                )
+                if shared_q is not None:
+                    return shared_q
                 return q.new_zeros((q.shape[0], self.padded_heads, q.shape[2]))
             return F.pad(
                 q,
@@ -1217,6 +1285,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 and q.shape[0] >= _Q_PAD_COPY_MIN_TOKENS
                 and not torch.cuda.is_current_stream_capturing()
             )
+            shared_q = (
+                self._shared_padded_q(q)
+                if self._pads_q_into_shared_buffer
+                and q.shape[0] > _FUSED_Q_PAD_MAX_TOKENS
+                else None
+            )
             q_padded = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
@@ -1224,7 +1298,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 slot_mapping,
                 positions,
                 cos_sin_cache,
-                0 if copy_q else pad_to,
+                0 if copy_q or shared_q is not None else pad_to,
                 self.eps,
                 swa_metadata.block_size,
                 False,  # apply_q_norm: qr is normed before wq_b
@@ -1236,6 +1310,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 out = q.new_empty((q.shape[0], self.padded_heads, q.shape[2]))
                 _pad_interleaved_q(q, out)
                 return out
+            if shared_q is not None:
+                _pad_interleaved_q(q, shared_q, zero_pad=False)
+                return shared_q
             return q if pad_to == 0 else q_padded
 
         assert not self.accepts_unnormed_unroped_query, (

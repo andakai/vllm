@@ -717,18 +717,23 @@ def test_q_interleaved_is_orthogonal_to_norm_and_rope(
 
 @pytest.mark.parametrize("num_tokens", [17, 1024, 2049])
 @pytest.mark.parametrize("dp_pad", [0, 5])
-def test_q_interleaved_pad_copy_matches_fused_insert(num_tokens: int, dp_pad: int):
+@pytest.mark.parametrize("n_heads,zero_pad", [(32, True), (16, False)])
+def test_q_interleaved_pad_copy_matches_fused_insert(
+    num_tokens: int, dp_pad: int, n_heads: int, zero_pad: bool
+):
     """A KV-only launch plus `_pad_interleaved_q` equals the fused launch.
 
-    Same cache bytes and same padded Q bits; the copy writes into a NaN-filled
-    buffer, and the last `dp_pad` rows have no slot, as under DP padding.
+    Same cache bytes and same padded Q bits; the last `dp_pad` rows have no
+    slot, as under DP padding. With `zero_pad` the copy writes into a
+    NaN-filled buffer; without it, into a zeroed buffer another layer's Q was
+    copied into first, whose padding slots must still read zero.
     """
     from vllm.models.deepseek_v41.attention import _pad_interleaved_q
 
     torch.manual_seed(8)
     device = "cuda"
     dtype = torch.bfloat16
-    block_size, n_heads, q_head_padded = 64, 32, 64
+    block_size, q_head_padded = 64, 64
     total = num_tokens + dp_pad
 
     q = torch.randn(total, n_heads, HEAD_DIM, dtype=dtype, device=device)
@@ -764,8 +769,12 @@ def test_q_interleaved_pad_copy_matches_fused_insert(num_tokens: int, dp_pad: in
     assert want_cache.any()
     torch.testing.assert_close(cache, want_cache, rtol=0, atol=0)
 
-    got = torch.full_like(want, float("nan"))
-    _pad_interleaved_q(q, got)
+    if zero_pad:
+        got = torch.full_like(want, float("nan"))
+    else:
+        got = torch.zeros_like(want)
+        _pad_interleaved_q(torch.randn_like(q), got, zero_pad=False)
+    _pad_interleaved_q(q, got, zero_pad=zero_pad)
     torch.testing.assert_close(
         got.view(torch.int16), want.view(torch.int16), rtol=0, atol=0
     )
