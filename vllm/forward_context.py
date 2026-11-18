@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import flashinfer_runtime_tuning_context
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
@@ -352,7 +353,10 @@ def set_forward_context(
     )
 
     try:
-        with override_forward_context(forward_context):
+        with (
+            override_forward_context(forward_context),
+            flashinfer_runtime_tuning_context(num_tokens),
+        ):
             yield
     finally:
         global last_logging_time, batchsize_logging_interval
