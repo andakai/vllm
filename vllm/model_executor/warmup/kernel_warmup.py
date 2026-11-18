@@ -518,6 +518,37 @@ def _run_flashinfer_autotune_mm_encoder(runner: "GPUModelRunner") -> None:
         del outputs
 
 
+def _flashinfer_autotune_max_tokens(runner: "GPUModelRunner", num_tokens: int) -> int:
+    """Largest M a dummy run of `num_tokens` tokens is tuned for."""
+    # The drafter may use more tokens than this pass in the same dummy run.
+    # Include its max M when building the autotune buckets.
+    max_tuning_tokens = num_tokens
+    speculator = runner.speculator
+    if speculator is not None:
+        num_query_per_req = speculator.num_query_per_req
+        num_draft_reqs = min(
+            num_tokens,
+            runner.max_num_reqs,
+            runner.max_num_tokens // num_query_per_req,
+        )
+        max_tuning_tokens = max(max_tuning_tokens, num_draft_reqs * num_query_per_req)
+    return max_tuning_tokens
+
+
+def _set_flashinfer_runtime_tuning_buckets(runner: "GPUModelRunner") -> None:
+    """Let serving look tactics up in the buckets the dummy runs tuned."""
+    import vllm.utils.flashinfer as fi_utils
+
+    buckets: set[int] = set()
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        buckets.update(
+            fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
+                _flashinfer_autotune_max_tokens(runner, num_tokens)
+            )
+        )
+    fi_utils.set_flashinfer_runtime_tuning_buckets(buckets)
+
+
 def _run_flashinfer_autotune_dummy_runs(
     runner: "GPUModelRunner", *, skip_attn: bool = False
 ) -> None:
@@ -526,21 +557,7 @@ def _run_flashinfer_autotune_dummy_runs(
 
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
     for num_tokens in _flashinfer_autotune_token_counts(runner):
-        # The drafter may use more tokens than this pass in the same dummy run.
-        # Include its max M when building the autotune buckets.
-        max_tuning_tokens = num_tokens
-        speculator = runner.speculator
-        if speculator is not None:
-            num_query_per_req = speculator.num_query_per_req
-            num_draft_reqs = min(
-                num_tokens,
-                runner.max_num_reqs,
-                runner.max_num_tokens // num_query_per_req,
-            )
-            max_tuning_tokens = max(
-                max_tuning_tokens, num_draft_reqs * num_query_per_req
-            )
-
+        max_tuning_tokens = _flashinfer_autotune_max_tokens(runner, num_tokens)
         tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
             max_tuning_tokens
         )
@@ -699,6 +716,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     finally:
         set_autotune_process_group(None)
 
+    _set_flashinfer_runtime_tuning_buckets(runner)
     if world.world_size > 1:
         world.barrier()
     if use_autotune_v2:

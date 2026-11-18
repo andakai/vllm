@@ -381,6 +381,9 @@ def test_flashinfer_autotune_lifecycle(
     monkeypatch.setattr(
         warmup, "autotune_hisparse_flashinfer_attention", events.hisparse
     )
+    monkeypatch.setattr(
+        warmup, "_set_flashinfer_runtime_tuning_buckets", events.runtime_buckets
+    )
 
     if failure is None:
         warmup.flashinfer_autotune(runner)
@@ -418,6 +421,7 @@ def test_flashinfer_autotune_lifecycle(
     expected.append(call.exit())
     expected.append(call.set_group(None))
     if failure is None:
+        expected.append(call.runtime_buckets(runner))
         if world_size > 1:
             expected.append(call.barrier())
         if use_v2 and world_size > 1:
@@ -554,6 +558,34 @@ def test_flashinfer_autotune_buckets_cover_drafter_tokens():
         8192,
         128,
     ]
+
+
+def test_flashinfer_runtime_buckets_cover_every_dummy_run(monkeypatch):
+    """Serving looks tactics up in the union of the passes' buckets."""
+    runner = _make_runner([])
+    runner.max_num_reqs = 256
+    runner.max_num_tokens = 8192
+    runner.speculator = SimpleNamespace(num_query_per_req=6)
+    recorded: list[set[int]] = []
+    monkeypatch.setattr(
+        fi_utils, "set_flashinfer_runtime_tuning_buckets", recorded.append
+    )
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(8192, 128),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
+            side_effect=lambda max_tokens: (1, 256, max_tokens),
+        ) as get_buckets,
+    ):
+        warmup._set_flashinfer_runtime_tuning_buckets(runner)
+
+    assert get_buckets.call_args_list == [call(8192), call(128 * 6)]
+    assert recorded == [{1, 256, 768, 8192}]
 
 
 class _AutotuneGroup:
@@ -715,6 +747,9 @@ def autotune_run(monkeypatch, tmp_path):
         )
         monkeypatch.setattr(warmup, "replayssm_autotune_warmup", lambda runner: None)
         monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: None)
+        monkeypatch.setattr(
+            warmup, "_set_flashinfer_runtime_tuning_buckets", lambda runner: None
+        )
         return run
 
     return make_run

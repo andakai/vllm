@@ -13,7 +13,7 @@ import importlib.util
 import inspect
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, NoReturn
 
 import requests
@@ -373,6 +373,59 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
+
+# Token buckets the FlashInfer autotune pass profiled; None until it has run.
+_runtime_tuning_buckets: tuple[int, ...] | None = None
+
+# Up to here the tuned buckets are dense (powers of two, then steps of 256 and
+# 512) and FlashInfer's own mappers round M up onto them. Above it the buckets
+# double, and the mappers' next power of two can leave the tuned range.
+_RUNTIME_TUNING_MIN_TOKENS = 4096
+
+
+def set_flashinfer_runtime_tuning_buckets(buckets: Iterable[int] | None) -> None:
+    """Record the token buckets the autotune pass profiled."""
+    global _runtime_tuning_buckets
+    _runtime_tuning_buckets = tuple(sorted(set(buckets))) if buckets else None
+
+
+def _runtime_tuning_round_up(num_tokens: int, buckets: Sequence[int]) -> bool:
+    """Whether `num_tokens` maps up to the next bucket rather than down: the
+    nearer bucket in ratio, so a prefill chunk plus a few rows (16896) keeps
+    the 16384 tactic instead of the 32768 one."""
+    below = max((b for b in buckets if b <= num_tokens), default=None)
+    above = min((b for b in buckets if b >= num_tokens), default=None)
+    if below is None or above is None:
+        return above is not None
+    return num_tokens * num_tokens > above * below
+
+
+def flashinfer_runtime_tuning_context(
+    num_tokens: int | None,
+) -> contextlib.AbstractContextManager:
+    """Look FlashInfer tactics up in the buckets they were tuned under.
+
+    Outside an `autotune()` context FlashInfer maps M with each op's default
+    mapper, which above 4096 rounds up to the next power of two. That bucket
+    can lie past the tuned range (M = 16896 with 20480 batched tokens maps to
+    32768) and the op runs its untuned fallback tactic. For forwards above
+    4096 tokens, map onto the tuned buckets instead, picking the nearer bucket
+    in ratio. Smaller forwards keep FlashInfer's mapping. The override is per
+    thread, so it is entered per forward.
+    """
+    buckets = _runtime_tuning_buckets
+    if (
+        buckets is None
+        or num_tokens is None
+        or num_tokens <= _RUNTIME_TUNING_MIN_TOKENS
+        or is_flashinfer_autotuning()
+    ):
+        return contextlib.nullcontext()
+    return autotune(
+        False,
+        tuning_buckets=buckets,
+        round_up=_runtime_tuning_round_up(num_tokens, buckets),
+    )
 
 
 @functools.cache
@@ -1500,6 +1553,8 @@ __all__ = [
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",
+    "set_flashinfer_runtime_tuning_buckets",
+    "flashinfer_runtime_tuning_context",
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
     "has_flashinfer_comm",
