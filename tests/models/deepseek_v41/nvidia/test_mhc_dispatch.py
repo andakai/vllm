@@ -105,6 +105,63 @@ def test_supports_mhc_all_reduce(monkeypatch, value, tp, multicast, expected):
 
 
 @pytest.mark.parametrize(
+    ("value", "tp", "dp", "pcp", "elastic", "moe_backend", "nodes", "expected"),
+    [
+        # GB300 TEP4: the EP group is the TP group and the MoE output a TP
+        # partial.
+        (103, 4, 1, 1, False, "auto", 1, True),
+        # DEP: DP > 1 dispatches and combines across ranks.
+        (103, 4, 2, 1, False, "auto", 1, False),
+        (103, 1, 4, 1, False, "auto", 1, False),
+        # Prefill context parallelism also dispatches and combines.
+        (103, 4, 1, 2, False, "auto", 1, False),
+        # Elastic EP may scale out to DP > 1 at runtime.
+        (103, 4, 1, 1, True, "auto", 1, False),
+        # MegaMoE backends shard the tokens (sequence parallelism).
+        (103, 4, 1, 1, False, "deep_gemm_mega_moe", 1, False),
+        # More than one node.
+        (103, 4, 1, 1, False, "auto", 2, False),
+        # H100 keeps its TP8 path to TP-only MoEs.
+        (90, 8, 1, 1, False, "auto", 1, False),
+    ],
+)
+def test_supports_mhc_all_reduce_under_ep(
+    monkeypatch, value, tp, dp, pcp, elastic, moe_backend, nodes, expected
+):
+    """Which expert-parallel deployments fuse the all-reduce into the mHC
+    boundaries: TEP4 on one node only."""
+    from vllm.distributed import parallel_state
+
+    monkeypatch.setattr(
+        mhc,
+        "current_platform",
+        SimpleNamespace(
+            is_device_capability=lambda c: c == value,
+            is_device_capability_family=lambda f: f == value // 10 * 10,
+        ),
+    )
+    comm = SimpleNamespace(ca_comm=SimpleNamespace(mnnvl_lamport_ag_multicast_ptr=1))
+    monkeypatch.setattr(
+        mhc, "get_tp_group", lambda: SimpleNamespace(device_communicator=comm)
+    )
+    monkeypatch.setattr(parallel_state, "get_node_count", lambda: nodes)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp,
+            enable_expert_parallel=True,
+            data_parallel_size=dp,
+            prefill_context_parallel_size=pcp,
+            enable_elastic_ep=elastic,
+        ),
+        kernel_config=SimpleNamespace(moe_backend=moe_backend),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(hidden_size=5120, hc_mult=4)
+        ),
+    )
+    assert mhc.supports_mhc_all_reduce(config) == expected
+
+
+@pytest.mark.parametrize(
     ("value", "tp", "custom", "expected"),
     [
         # A100 at TP8, 4 and 2 with vLLM's custom all-reduce.

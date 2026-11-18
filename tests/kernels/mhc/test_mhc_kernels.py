@@ -57,7 +57,9 @@ DEVICE = current_platform.device_type
     [
         (4, False, 5120, 4, 1, True),
         (2, False, 5120, 4, 1, False),
-        (4, True, 5120, 4, 1, False),
+        # TEP4 on one node: the MoE output is a TP partial, as without EP.
+        (4, True, 5120, 4, 1, True),
+        (4, True, 4096, 4, 1, False),
         (4, False, 4096, 4, 1, False),
         (4, False, 5120, 2, 1, False),
         (4, False, 5120, 4, 0, False),
@@ -67,12 +69,18 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
     monkeypatch, tp, ep, hidden, hc, multicast, expected
 ):
     """Eligibility depends on kernel inputs, not serving or attention settings."""
+    from vllm.distributed import parallel_state
     from vllm.models.deepseek_v41.nvidia.ops import mhc
 
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
-            tensor_parallel_size=tp, enable_expert_parallel=ep
+            tensor_parallel_size=tp,
+            enable_expert_parallel=ep,
+            data_parallel_size=1,
+            prefill_context_parallel_size=1,
+            enable_elastic_ep=False,
         ),
+        kernel_config=SimpleNamespace(moe_backend="auto"),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(hidden_size=hidden, hc_mult=hc)
         ),
@@ -83,6 +91,7 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
     # The TP4 fusion is SM100's; SM90 at TP8 is in the model's own tests.
     monkeypatch.setattr(
         mhc,
