@@ -390,3 +390,15 @@ def test_tokens_response_echoes_output_mode_without_text():
     ).model_dump()
     assert dumped["output_mode"] == "tokens"
     assert "text" not in dumped["choices"][0]
+
+
+def test_sampling_mask_format_defaults_to_nested():
+    req = GenerateRequest.model_validate(_base_payload())
+    assert req.sampling_mask_format == "nested"
+
+
+def test_sampling_mask_format_flat_rejects_stream():
+    payload = {**_base_payload(), "sampling_mask_format": "flat"}
+    assert GenerateRequest.model_validate(payload).sampling_mask_format == "flat"
+    with pytest.raises(ValidationError, match="stream"):
+        GenerateRequest.model_validate({**payload, "stream": True})

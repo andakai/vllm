@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.outputs import SamplingMask
 from vllm.platforms import current_platform
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -89,6 +90,42 @@ def test_sampling_mask_lists_slices_multiple_positions_by_request():
     assert single.offsets is None
     assert multi.to_nested_list() == [[20], [30, 31, 32]]
     assert multi.cu_num_generated_tokens is None
+
+
+def test_sampling_mask_lists_concat_across_steps():
+    chunks = [
+        SamplingMaskLists(np.array([7, 9], dtype=np.int32)),
+        SamplingMaskLists(
+            np.array([20, 30, 31, 32], dtype=np.int32), np.array([0, 1, 4])
+        ),
+        SamplingMaskLists(np.array([], dtype=np.int32)),
+    ]
+
+    flat, offsets = SamplingMaskLists.concat(chunks)
+
+    assert flat.dtype == np.int32 and offsets.dtype == np.int64
+    assert flat.tolist() == [7, 9, 20, 30, 31, 32]
+    assert offsets.tolist() == [0, 2, 3, 6, 6]
+
+
+def test_sampling_mask_csr_and_nested_views_agree():
+    flat = np.array([7, 9, 20, 30, 31], dtype=np.int32)
+    offsets = np.array([0, 2, 3, 3, 5], dtype=np.int64)
+    nested = [[7, 9], [20], [], [30, 31]]
+
+    from_csr = SamplingMask.from_csr(flat, offsets)
+    assert from_csr.to_csr()[0] is flat
+    assert from_csr == SamplingMask(nested)
+    assert from_csr.token_ids == nested
+
+    csr = SamplingMask(nested).to_csr()
+    assert csr[0].dtype == np.int32 and csr[1].dtype == np.int64
+    assert csr[0].tolist() == flat.tolist()
+    assert csr[1].tolist() == offsets.tolist()
+
+    # Extending the nested lists (RequestOutput.add) updates the CSR view.
+    from_csr.token_ids.extend([[1]])
+    assert from_csr.to_csr()[1].tolist() == [0, 2, 3, 3, 5, 6]
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
