@@ -502,12 +502,8 @@ class RequestState:
 
         sampling_mask = None
         if (delta or finished) and self.sampling_mask_chunks:
-            sampling_mask = SamplingMask(
-                [
-                    position
-                    for chunk in self.sampling_mask_chunks
-                    for position in chunk.to_nested_list()
-                ]
+            sampling_mask = SamplingMask.from_csr(
+                *SamplingMaskLists.concat(self.sampling_mask_chunks)
             )
             if delta:
                 self.sampling_mask_chunks.clear()

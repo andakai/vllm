@@ -80,6 +80,22 @@ class SamplingMaskLists(NamedTuple):
             self.token_ids[lo:hi], self.offsets[start : end + 1] - lo
         )
 
+    @staticmethod
+    def concat(chunks: list["SamplingMaskLists"]) -> tuple[np.ndarray, np.ndarray]:
+        """Join request chunks into one `(flat int32 ids, int64 offsets)`."""
+        flat = np.concatenate([c.token_ids for c in chunks]).astype(
+            np.int32, copy=False
+        )
+        lens = np.concatenate(
+            [
+                [len(c.token_ids)] if c.offsets is None else np.diff(c.offsets)
+                for c in chunks
+            ]
+        )
+        offsets = np.zeros(len(lens) + 1, dtype=np.int64)
+        np.cumsum(lens, out=offsets[1:])
+        return flat, offsets
+
     def to_nested_list(self) -> list[list[int]]:
         token_ids = self.token_ids.tolist()
         if self.offsets is None:
