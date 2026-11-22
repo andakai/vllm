@@ -35,15 +35,59 @@ class RequestError:
         return GenerationError(self.message)
 
 
-@dataclass
 class SamplingMask:
     """Per-token sampling support sets aligned with completion token IDs.
 
-    Each inner list contains the vocabulary token IDs that survived
-    top-k / top-p / min-p filtering for the corresponding generated token.
+    Each inner list of `token_ids` contains the vocabulary token IDs that
+    survived top-k / top-p / min-p filtering for the corresponding generated
+    token. A mask built by the engine keeps its CSR arrays and builds the
+    nested lists only on first access to `token_ids`.
     """
 
-    token_ids: list[list[int]]
+    def __init__(self, token_ids: list[list[int]]):
+        self._token_ids: list[list[int]] | None = token_ids
+        self._csr: tuple[np.ndarray, np.ndarray] | None = None
+
+    @classmethod
+    def from_csr(cls, flat: np.ndarray, offsets: np.ndarray) -> "SamplingMask":
+        """Row `i` is `flat[offsets[i]:offsets[i + 1]]`."""
+        mask = cls.__new__(cls)
+        mask._token_ids = None
+        mask._csr = (flat, offsets)
+        return mask
+
+    @property
+    def token_ids(self) -> list[list[int]]:
+        if self._token_ids is None:
+            assert self._csr is not None
+            ids = self._csr[0].tolist()
+            offsets = self._csr[1].tolist()
+            self._token_ids = [
+                ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)
+            ]
+            # Callers may extend the lists, so they are the source of truth now.
+            self._csr = None
+        return self._token_ids
+
+    def to_csr(self) -> tuple[np.ndarray, np.ndarray]:
+        """`(flat int32 token ids, int64 offsets of length num_rows + 1)`."""
+        if self._csr is not None:
+            return self._csr
+        rows = self.token_ids
+        offsets = np.zeros(len(rows) + 1, dtype=np.int64)
+        np.cumsum([len(row) for row in rows], out=offsets[1:])
+        flat = np.fromiter(
+            (t for row in rows for t in row), dtype=np.int32, count=int(offsets[-1])
+        )
+        return flat, offsets
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SamplingMask):
+            return NotImplemented
+        return self.token_ids == other.token_ids
+
+    def __repr__(self) -> str:
+        return f"SamplingMask(token_ids={self.token_ids})"
 
 
 @dataclass

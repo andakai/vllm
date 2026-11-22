@@ -27,6 +27,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. `bad_words` needs a tokenizer: a server without one (`--tokens-only` or `--skip-tokenizer-init`) rejects it with a 400. |
 | `output_mode` | `"tokens"` (default) or `"text"`, see [Output modes](#output-modes). |
 | `stream`, `stream_options` | SSE chunks ending with `data: [DONE]`. |
+| `sampling_mask_format` | `"nested"` (default) or `"flat"`. `"flat"` returns the sampling mask as `sampling_mask_flat` instead of `sampling_mask`; it is rejected with `stream`. See [Sampling Mask](../../training/sampling_mask.md#flat-format). |
 | `return_token_ids` | Echo the final prompt IDs as `prompt_token_ids`. |
 | `features` / `content_parts` | Multimodal input, mutually exclusive. |
 | `request_id`, `model`, `cache_salt`, `priority`, `kv_transfer_params`, `ec_transfer_params` | Optional. |
@@ -40,6 +41,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `stop_reason` | Stop token ID or string; `null` on EOS, length and abort. |
 | `logprobs` | `{"content": [{"token_id", "logprob", "rank", "top_logprobs": [...]}]}`, one entry per token, sampled token first. `token_id` is an integer, not the older `"token_id:<id>"` string. Needs `sampling_params.logprobs`. |
 | `weight_versions`, `routed_experts`, `sampling_mask` | Optional, see [Weight versions](#weight-versions); the last two need `--enable-return-routed-experts` / `--return-sampling-mask`. |
+| `sampling_mask_flat` | Set instead of `sampling_mask` when the request sets `sampling_mask_format: "flat"`: `{"token_ids", "offsets"}`, two base64 `.npy` arrays (int32, int64). |
 
 The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprobs`. Stream chunks carry the same per-choice fields for the new tokens.
 

@@ -333,6 +333,17 @@ class GenerateRequest(BaseModel):
 
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    sampling_mask_format: Literal["nested", "flat"] = Field(
+        default="nested",
+        description=(
+            "How to return sampling masks when the server runs with "
+            "`--return-sampling-mask`. 'nested' returns `sampling_mask` as one "
+            "list of token IDs per output token. 'flat' returns "
+            "`sampling_mask_flat` as base64-encoded `.npy` arrays, which is "
+            "much cheaper to build and parse for long outputs. 'flat' is not "
+            "supported with `stream`."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -416,6 +427,12 @@ class GenerateRequest(BaseModel):
                 f"output_mode={self.output_mode!r} requires "
                 "sampling_params.detokenize to be true"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_sampling_mask_format(self) -> "GenerateRequest":
+        if self.sampling_mask_format == "flat" and self.stream:
+            raise ValueError("sampling_mask_format='flat' does not support stream")
         return self
 
     @model_validator(mode="after")
@@ -514,6 +531,19 @@ class GenerateLogProbs(BaseModel):
     content: list[GenerateLogProbsContent] | None = None
 
 
+class FlatSamplingMask(BaseModel):
+    """Sampling masks in CSR form, each array a base64-encoded `.npy`.
+
+    The mask of output token `i` is `token_ids[offsets[i]:offsets[i + 1]]`.
+    Decode each array with `np.load(io.BytesIO(base64.b64decode(s)))`.
+    """
+
+    # int32, [total number of mask token ids]
+    token_ids: str
+    # int64, [num_output_tokens + 1]
+    offsets: str
+
+
 class GenerateChoiceBase(BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
 
@@ -537,6 +567,9 @@ class GenerateChoiceBase(BaseModel):
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
+    # Set instead of `sampling_mask` when the request asks for
+    # sampling_mask_format='flat'.
+    sampling_mask_flat: FlatSamplingMask | None = None
 
     @field_validator("token_ids")
     @classmethod

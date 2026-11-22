@@ -74,6 +74,7 @@ from .mm_features import (
     rebuild_mm_placeholders,
 )
 from .protocol import (
+    FlatSamplingMask,
     GenerateDerenderChoice,
     GenerateDerenderResponse,
     GenerateDerenderStreamChoice,
@@ -599,7 +600,16 @@ class ServingTokens(GenerateBaseServing):
             )
 
             sampling_mask = None
-            if output.sampling_mask is not None:
+            sampling_mask_flat = None
+            if output.sampling_mask is not None and (
+                request.sampling_mask_format == "flat"
+            ):
+                # Skips building and validating one Python list per token.
+                flat, offsets = output.sampling_mask.to_csr()
+                sampling_mask_flat = FlatSamplingMask(
+                    token_ids=numpy2base64(flat), offsets=numpy2base64(offsets)
+                )
+            elif output.sampling_mask is not None:
                 sampling_mask = output.sampling_mask.token_ids
 
             choice_fields: dict[str, Any] = dict(
@@ -611,6 +621,7 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
+                sampling_mask_flat=sampling_mask_flat,
             )
             if derender_mode:
                 derender_choice_fields.append(choice_fields)
@@ -655,6 +666,7 @@ class ServingTokens(GenerateBaseServing):
                     fields["logprobs"] = None
                     fields["token_ids"] = None
                     fields["sampling_mask"] = None
+                    fields["sampling_mask_flat"] = None
                 derender_choices.append(
                     GenerateDerenderChoice(message=message, **fields)
                 )

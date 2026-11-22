@@ -55,6 +55,41 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 
 With `stream=true`, each chunk carries the masks of the tokens it emits.
 
+### Flat format
+
+At wide masks the JSON lists dominate the response cost: with `top_k=1000`
+and 2048 output tokens one response holds about 2M IDs. Set
+`"sampling_mask_format": "flat"` on a non-streaming request to receive the
+mask as two base64-encoded `.npy` arrays instead, the same encoding
+`routed_experts` uses. Row `i` (the mask of generated token `i`) is
+`token_ids[offsets[i]:offsets[i + 1]]`:
+
+```json
+{
+  "choices": [{
+    "token_ids": [187, 42, 303],
+    "sampling_mask": null,
+    "sampling_mask_flat": {"token_ids": "<base64 .npy int32>", "offsets": "<base64 .npy int64>"},
+    "finish_reason": "stop"
+  }]
+}
+```
+
+```python
+import base64, io
+import numpy as np
+
+def decode(s: str) -> np.ndarray:
+    return np.load(io.BytesIO(base64.b64decode(s)), allow_pickle=False)
+
+flat = choice["sampling_mask_flat"]
+token_ids, offsets = decode(flat["token_ids"]), decode(flat["offsets"])
+mask_i = token_ids[offsets[i]:offsets[i + 1]]
+```
+
+`"flat"` is rejected together with `stream=true`. The Rust frontend ignores
+the field and returns nested masks.
+
 ## Requirements
 
 | Requirement | Reason |
@@ -81,8 +116,9 @@ The engine rejects unsupported combinations at startup or request time:
 2. After sampling, `torch.isfinite(processed_logits)` identifies the surviving
    token IDs — this is the sampling mask.
 3. The mask is transferred GPU → CPU asynchronously alongside sampled tokens.
-4. On request completion, per-step masks are merged and converted to
-   `list[list[int]]` for the response.
+4. On request completion, per-step masks are joined into one CSR pair
+   (token IDs and row offsets). The response converts them to
+   `list[list[int]]`, or encodes the pair directly in the flat format.
 
 ## RL training usage
 
