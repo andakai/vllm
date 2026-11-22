@@ -20,6 +20,8 @@ Rejected at startup: adaptive speculative verification, PP > 1 and DCP/PCP > 1. 
 
 KV connectors are not rejected, including the prefill/decode ones (`NixlConnector`, `MoRIIOConnector`, `MooncakeConnector`, ...). In a prefill/decode deployment, however, the decode engine holds no rows for the KV the prefill engine computed. It accepts that KV only up to `routed_experts_prompt_start` and computes the rest of the prompt again, so the output is correct but the prefill work past that position is lost.
 
+To keep the prefill work, let the proxy assemble the rows instead; see [Prefill/decode disaggregation](#prefilldecode-disaggregation).
+
 ### Backend row restoration
 
 A backend's `MoERunner` or `RoutedExpertsCaptureSource` can optionally implement
@@ -59,6 +61,25 @@ experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 ## `routed_experts_prompt_start`
 
 Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
+
+## Prefill/decode disaggregation
+
+The prefill engine already returns the rows of the prompt it computed, so the decode engine does not need them:
+
+1. Run the prefill engine with `--enable-return-routed-experts` as well. Its response (`max_tokens: 1`) carries rows `[0, R)`. `R` is the prompt length, or less when the KV connector leaves the last prompt tokens for the decode engine to compute.
+2. Send the decode request with `routed_experts_prompt_start` set to `R`, the number of rows the prefill response carries, not the prompt length. The decode engine then loads the transferred KV instead of computing the prompt again, and returns rows from `R` on.
+3. Join the two:
+
+```python
+def rows_of(choice):
+    return np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
+
+prefill_rows = rows_of(prefill_choice)  # rows [0, R)
+# Decode request: sampling_params["routed_experts_prompt_start"] = len(prefill_rows)
+rows = np.concatenate([prefill_rows, rows_of(decode_choice)])
+```
+
+Row `i` of `rows` is then position `i` of `prompt_token_ids + output_token_ids`, as without disaggregation. The prompt rows are the ones the decode engine would have computed, and the output rows belong to the tokens the decode engine returned.
 
 ## Row storage
 
