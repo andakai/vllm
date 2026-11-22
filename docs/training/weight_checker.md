@@ -16,6 +16,9 @@ Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 | `{"action": "reset"}` | `{"status": "reset"}` |
 | `{"action": "compare", "baseline": {key: sha256_hex}}` | `{"match": bool, "mismatches": [key]}` |
 
+`checksum` and `compare` also accept `"names": [parameter_name]`, see
+[Checking selected parameters](#checking-selected-parameters).
+
 Keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`, so each
 shard is checked separately. All actions cover the target model's parameters,
 which is what weight loading writes; `reset` zeroes them. The endpoint keeps no
@@ -43,6 +46,26 @@ curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
 
 curl -X POST $URL/resume
 ```
+
+## Checking selected parameters
+
+Hashing every weight takes seconds per rank on large models. When an update
+touches only some parameters, pass their names to hash just those:
+
+```bash
+curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
+  -d '{"action":"checksum","names":["model.norm.weight","lm_head.weight"]}'
+```
+
+- Names are vLLM parameter names, as in `model.named_parameters()`, for
+  example `model.layers.0.self_attn.qkv_proj.weight` rather than the
+  checkpoint's `q_proj`/`k_proj`/`v_proj`. A parameter stored in parts
+  returns one key per part.
+- A name that no rank holds returns HTTP 400, so a typo cannot pass as an
+  empty match. With pipeline parallelism each name is found on its own stage.
+- `compare` with `names` ignores baseline keys of other parameters, so a full
+  baseline can be reused.
+- `reset` does not take `names`.
 
 ## Limitations
 

@@ -26,10 +26,14 @@ from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.platforms import current_platform
 
 
-def weight_checker(url: str, action: str, baseline=None) -> requests.Response:
+def weight_checker(
+    url: str, action: str, baseline=None, names=None
+) -> requests.Response:
     body = {"action": action}
     if baseline is not None:
         body["baseline"] = baseline
+    if names is not None:
+        body["names"] = names
     return requests.post(f"{url}/weight_checker", json=body, timeout=300)
 
 
@@ -41,6 +45,10 @@ def checksums(url: str) -> dict[str, str]:
 
 def ranks(keys) -> set[str]:
     return {key.rsplit(":", 1)[0] for key in keys}
+
+
+def tensor(key: str) -> str:
+    return key.rsplit(":", 1)[1]
 
 
 def reset_reload_and_compare(url: str) -> None:
@@ -68,7 +76,15 @@ def server_url():
 class TestSingleGPU:
     @pytest.mark.parametrize(
         "payload",
-        [{}, {"action": "frobnicate"}, {"action": "compare"}, [], None],
+        [
+            {},
+            {"action": "frobnicate"},
+            {"action": "compare"},
+            {"action": "checksum", "names": []},
+            {"action": "reset", "names": ["lm_head.weight"]},
+            [],
+            None,
+        ],
     )
     def test_invalid_request_returns_400(self, server_url, payload):
         response = requests.post(
@@ -91,6 +107,27 @@ class TestSingleGPU:
             "match": False,
             "mismatches": sorted([changed, missing]),
         }
+
+    def test_names_limit_checksum_and_compare(self, server_url):
+        baseline = checksums(server_url)
+        names = sorted({tensor(key) for key in baseline})[:2]
+        selected = {k: v for k, v in baseline.items() if tensor(k) in names}
+
+        response = weight_checker(server_url, "checksum", names=names)
+        assert response.json() == {"checksums": selected}
+
+        # A full baseline works; keys outside `names` are not compared.
+        other = next(k for k in baseline if k not in selected)
+        changed = next(iter(selected))
+        altered = {**baseline, other: "0" * 64, changed: "0" * 64}
+        assert weight_checker(server_url, "compare", altered, names).json() == {
+            "match": False,
+            "mismatches": [changed],
+        }
+
+        response = weight_checker(server_url, "checksum", names=[*names, "nope"])
+        assert response.status_code == 400
+        assert "nope" in response.text
 
     def test_reset_changes_weights_and_reload_restores_them(self, server_url):
         reset_reload_and_compare(server_url)

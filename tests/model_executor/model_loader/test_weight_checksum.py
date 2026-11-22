@@ -41,6 +41,13 @@ def test_digests_cover_every_parameter():
     }
 
 
+def test_digests_can_be_limited_to_named_parameters():
+    model = _Model()
+    everything = compute_tensor_digests(model)
+    names = ["linear.bias", "strided"]
+    assert compute_tensor_digests(model, names) == {n: everything[n] for n in names}
+
+
 def test_zero_weights_changes_every_parameter_and_no_buffer():
     model = _Model()
     before = compute_tensor_digests(model)

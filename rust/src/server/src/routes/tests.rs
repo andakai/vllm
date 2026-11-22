@@ -10840,6 +10840,64 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn weight_checker_route_limits_checksum_and_compare_to_names() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let workers = Value::Array(vec![
+                Value::Map(vec![(Value::from("tp0:b.0"), Value::from("1"))]),
+                Value::Map(vec![(Value::from("tp1:b.0"), Value::from("2"))]),
+            ]);
+            for names in [vec!["b"], vec!["b"], vec!["b", "c"]] {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                let rpc = array[3].as_array().expect("rpc args");
+                assert_eq!(rpc[0], Value::from("compute_weight_checksums"));
+                let names = names.into_iter().map(Value::from).collect();
+                assert_eq!(
+                    rpc[3],
+                    Value::Map(vec![(Value::from("names"), Value::Array(names))])
+                );
+                let call_id = array[1].as_u64().expect("call id");
+                let envelope = UtilityResultEnvelope::without_type_info(workers.clone());
+                send_outputs(push, utility_outputs(call_id, envelope)).await;
+            }
+        })
+    })
+    .await;
+
+    let (status, body) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "checksum", "names": ["b"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"checksums": {"tp0:b.0": "1", "tp1:b.0": "2"}}));
+
+    // Baseline keys outside `names` are not compared.
+    let baseline = json!({"tp0:a": "x", "tp0:b.0": "1", "tp1:b.0": "9"});
+    let (status, body) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "compare", "baseline": baseline, "names": ["b"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"match": false, "mismatches": ["tp1:b.0"]}));
+
+    let (status, _) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "checksum", "names": ["b", "c"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn weight_checker_route_rejects_invalid_requests_before_engine_calls() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
         boxed_test_future(async move {
@@ -10853,6 +10911,8 @@ async fn weight_checker_route_rejects_invalid_requests_before_engine_calls() {
         json!({"action": "frobnicate"}),
         json!({"action": "compare"}),
         json!({"action": "compare", "baseline": {"k": 1}}),
+        json!({"action": "checksum", "names": []}),
+        json!({"action": "reset", "names": ["a"]}),
     ] {
         let (status, _) = post_json(&mut app, "/weight_checker", body.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
