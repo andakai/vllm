@@ -27,6 +27,8 @@ pub(crate) struct WeightCheckerRequest {
     action: WeightCheckerAction,
     #[serde(default)]
     baseline: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    names: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -45,7 +47,23 @@ pub(crate) enum WeightCheckerResponse {
     },
 }
 
+/// The requested parameter names that own a checksum key.
+///
+/// Keys are `{rank prefix}:{tensor}`, where the tensor is a parameter name,
+/// optionally followed by `.{partition}` for parameters stored in parts.
+fn requested_names<'a>(key: &str, names: &'a BTreeSet<String>) -> Vec<&'a String> {
+    let tensor = key.splitn(5, ':').last().unwrap_or(key);
+    tensor
+        .match_indices('.')
+        .map(|(end, _)| &tensor[..end])
+        .chain([tensor])
+        .filter_map(|prefix| names.get(prefix))
+        .collect()
+}
+
 /// Checksum, reset, or compare model weights against a baseline.
+///
+/// `names` limits checksum and compare to those parameters.
 pub async fn weight_checker(
     State(state): State<Arc<AppState>>,
     body: Result<Json<WeightCheckerRequest>, JsonRejection>,
@@ -59,6 +77,16 @@ pub async fn weight_checker(
         )
     };
 
+    if body
+        .names
+        .as_ref()
+        .is_some_and(|names| body.action == WeightCheckerAction::Reset || names.is_empty())
+    {
+        return Err(invalid_request!(
+            param = Some("names"),
+            "'names' must be a non-empty list, with action 'checksum' or 'compare'"
+        ));
+    }
     if body.action == WeightCheckerAction::Reset {
         let (args, kwargs) = no_args();
         client
@@ -74,7 +102,10 @@ pub async fn weight_checker(
         ));
     }
 
-    let (args, kwargs) = no_args();
+    let (args, mut kwargs) = no_args();
+    if let Some(names) = &body.names {
+        kwargs.insert("names".to_string(), JsonValue::from(names.clone()));
+    }
     let workers = client
         .collective_rpc("compute_weight_checksums", None, args, kwargs)
         .await
@@ -94,8 +125,25 @@ pub async fn weight_checker(
         }
     }
 
-    let Some(baseline) = body.baseline.filter(|_| body.action == WeightCheckerAction::Compare)
-    else {
+    let mut baseline = body.baseline;
+    if let Some(names) = body.names {
+        let requested: BTreeSet<String> = names.into_iter().collect();
+        let found: BTreeSet<&String> = checksums
+            .keys()
+            .flat_map(|key| requested_names(key, &requested))
+            .collect();
+        let unknown: Vec<&String> = requested.iter().filter(|n| !found.contains(n)).collect();
+        if !unknown.is_empty() {
+            return Err(invalid_request!(
+                param = Some("names"),
+                "Unknown parameter names: {unknown:?}"
+            ));
+        }
+        if let Some(baseline) = baseline.as_mut() {
+            baseline.retain(|key, _| !requested_names(key, &requested).is_empty());
+        }
+    }
+    let Some(baseline) = baseline.filter(|_| body.action == WeightCheckerAction::Compare) else {
         return Ok(Json(WeightCheckerResponse::Checksums { checksums }));
     };
     let mismatches: Vec<String> = checksums

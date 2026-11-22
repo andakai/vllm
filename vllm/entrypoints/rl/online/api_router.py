@@ -229,14 +229,34 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
+def _requested_names(key: str, names: set[str]) -> set[str]:
+    """The requested parameter names that own a checksum key.
+
+    Keys are `{rank prefix}:{tensor}`, where the tensor is a parameter name,
+    optionally followed by `.{partition}` for parameters stored in parts.
+    """
+    parts = key.split(":", 4)[-1].split(".")
+    return names.intersection(".".join(parts[:i]) for i in range(1, len(parts) + 1))
+
+
 @router.post("/weight_checker")
 async def weight_checker(
     raw_request: Request,
     action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
     baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
+    names: Annotated[list[str] | None, Body(embed=True)] = None,
 ) -> JSONResponse:
-    """Checksum, reset, or compare model weights against a baseline."""
+    """Checksum, reset, or compare model weights against a baseline.
+
+    `names` limits checksum and compare to those parameters.
+    """
     client = engine_client(raw_request)
+    if names is not None and (action == "reset" or not names):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="'names' must be a non-empty list, with action 'checksum' "
+            "or 'compare'",
+        )
     if action == "reset":
         await client.collective_rpc("reset_weights")
         return JSONResponse(content={"status": "reset"})
@@ -247,13 +267,27 @@ async def weight_checker(
         )
 
     checksums: dict[str, str] = {}
-    for worker_checksums in await client.compute_weight_checksums():
+    for worker_checksums in await client.compute_weight_checksums(names):
         if duplicates := checksums.keys() & worker_checksums.keys():
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 detail=f"Duplicate weight checksum keys: {sorted(duplicates)}",
             )
         checksums.update(worker_checksums)
+    if names is not None:
+        requested = set(names)
+        found = set().union(*(_requested_names(key, requested) for key in checksums))
+        if unknown := sorted(requested - found):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST.value,
+                detail=f"Unknown parameter names: {unknown}",
+            )
+        if baseline is not None:
+            baseline = {
+                key: digest
+                for key, digest in baseline.items()
+                if _requested_names(key, requested)
+            }
     if action == "checksum":
         return JSONResponse(content={"checksums": checksums})
 

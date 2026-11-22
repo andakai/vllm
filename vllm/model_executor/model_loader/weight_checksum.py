@@ -3,7 +3,7 @@
 """Per-parameter weight digests and reset, for verifying weight updates."""
 
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 
 import torch
 import torch.nn as nn
@@ -24,17 +24,23 @@ def _tensors(name: str, tensor: torch.Tensor) -> Iterator[tuple[str, torch.Tenso
         yield name, tensor
 
 
-def _weights(model: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+def _weights(
+    model: nn.Module, names: Collection[str] | None = None
+) -> Iterator[tuple[str, torch.Tensor]]:
     for name, param in model.named_parameters():
-        yield from _tensors(name, param)
+        if names is None or name in names:
+            yield from _tensors(name, param)
 
 
-def compute_tensor_digests(model: nn.Module) -> dict[str, str]:
+def compute_tensor_digests(
+    model: nn.Module, names: Collection[str] | None = None
+) -> dict[str, str]:
+    """Digest every parameter, or only the parameters named in `names`."""
     return {
         name: hashlib.sha256(
             weight.detach().cpu().contiguous().view(-1).view(torch.uint8).numpy()
         ).hexdigest()
-        for name, weight in _weights(model)
+        for name, weight in _weights(model, None if names is None else set(names))
     }
 
 
