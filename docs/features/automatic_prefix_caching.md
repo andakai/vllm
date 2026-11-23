@@ -71,6 +71,10 @@ Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The m
 
 Clients usually drop a reasoning model's thinking from the next turn's prompt, so the blocks that hold a finished request's output are rarely hit again. With `--evict-reasoning-blocks-first` (requires `--reasoning-parser`), a finished request whose output contains the reasoning start or end tokens frees the blocks from its first output token on to the front of the free queue. They stay cached but are evicted before other cached blocks, which keeps conversation prefixes resident under KV-cache pressure. Only full-attention and sliding-window KV cache groups apply it.
 
+## Tail-first eviction
+
+With many interleaved conversations, plain LRU keeps some conversations whole and evicts others entirely, so their next turn recomputes everything. With `--evict-tail-tokens-first N`, a finished request frees the whole blocks within its last `N` tokens to the front of the free queue, so a follow-up turn recomputes at most `N` tokens as long as the rest of its prefix survives (Tail-Optimized LRU). To keep a follow-up prefill within `xi` tokens when follow-up prompts add about `q` new tokens, set `N = xi - q`. Keep `N` well below the typical conversation length: a larger value makes most turns recompute most of their history.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

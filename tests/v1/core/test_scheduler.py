@@ -9113,3 +9113,25 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+@pytest.mark.parametrize(
+    ("tail", "reasoning_start", "finished", "expected"),
+    [
+        (0, None, True, None),
+        (100, None, False, None),
+        # 300 tokens, keep 200 -> rounded up to the 16-token block at 208.
+        (100, None, True, 208),
+        (400, None, True, 0),
+        (100, 40, True, 40),
+        (0, 40, True, 40),
+    ],
+)
+def test_evict_first_from(tail, reasoning_start, finished, expected):
+    scheduler = SimpleNamespace(
+        cache_config=SimpleNamespace(evict_tail_tokens_first=tail),
+        block_size=16,
+        _reasoning_output_start=lambda request: reasoning_start,
+    )
+    request = SimpleNamespace(num_tokens=300, is_finished=lambda: finished)
+    assert Scheduler._evict_first_from(scheduler, request) == expected

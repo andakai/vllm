@@ -3256,6 +3256,19 @@ class Scheduler(SchedulerInterface):
             request.last_sched_seq <= self.processed_step_seq
         )
 
+    def _evict_first_from(self, request: Request) -> int | None:
+        """The token position from which a finished request's blocks are
+        evicted first, if any (`--evict-tail-tokens-first`,
+        `--evict-reasoning-blocks-first`)."""
+        if not request.is_finished():
+            return None
+        starts = [self._reasoning_output_start(request)]
+        if tail := self.cache_config.evict_tail_tokens_first:
+            # Whole blocks only, so a follow-up recomputes at most `tail`.
+            num_kept = max(request.num_tokens - tail, 0)
+            starts.append(cdiv(num_kept, self.block_size) * self.block_size)
+        return min((s for s in starts if s is not None), default=None)
+
     def _reasoning_output_start(self, request: Request) -> int | None:
         """The first output token's position for a finished request whose
         output contains reasoning, when `--evict-reasoning-blocks-first` asks
@@ -3280,7 +3293,7 @@ class Scheduler(SchedulerInterface):
         pool when an in-flight GPU step may still write them.
         """
         if self._request_blocks_can_be_freed(request):
-            self.kv_cache_manager.free(request, self._reasoning_output_start(request))
+            self.kv_cache_manager.free(request, self._evict_first_from(request))
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
         if blocks:

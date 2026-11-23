@@ -587,6 +587,7 @@ class EngineArgs:
         CacheConfig.prefix_caching_hash_algo
     )
     evict_reasoning_blocks_first: bool = CacheConfig.evict_reasoning_blocks_first
+    evict_tail_tokens_first: int = CacheConfig.evict_tail_tokens_first
     prefix_cache_retention_interval: int | None = get_field(
         CacheConfig, "prefix_cache_retention_interval"
     )
@@ -1428,6 +1429,9 @@ class EngineArgs:
         cache_group.add_argument(
             "--evict-reasoning-blocks-first",
             **cache_kwargs["evict_reasoning_blocks_first"],
+        )
+        cache_group.add_argument(
+            "--evict-tail-tokens-first", **cache_kwargs["evict_tail_tokens_first"]
         )
         cache_group.add_argument(
             "--prefix-cache-retention-interval",
@@ -2347,6 +2351,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             evict_reasoning_blocks_first=self.evict_reasoning_blocks_first,
+            evict_tail_tokens_first=self.evict_tail_tokens_first,
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
