@@ -10880,6 +10880,7 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
                     Value::from(1_u64),
                     Value::from("abort"),
                     Value::from(true),
+                    Value::from(false),
                 ])
             );
 
@@ -11036,7 +11037,28 @@ async fn sleep_route_forwards_reset_connector_opt_out() {
     assert_route_sends_utility_args(
         "/sleep?reset_connector=False",
         "sleep",
-        vec![Value::from(1_u64), Value::from("abort"), Value::from(false)],
+        vec![
+            Value::from(1_u64),
+            Value::from("abort"),
+            Value::from(false),
+            Value::from(false),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn sleep_route_forwards_keep_kv_cache() {
+    assert_route_sends_utility_args(
+        "/sleep?mode=keep&keep_kv_cache=true",
+        "sleep",
+        vec![
+            Value::from(1_u64),
+            Value::from("keep"),
+            Value::from(true),
+            Value::from(true),
+        ],
     )
     .await;
 }
