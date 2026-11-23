@@ -383,6 +383,32 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
             self._first_ranks.view(),
         )
 
+    def scored_rows(self) -> tuple[int, np.ndarray, np.ndarray, np.ndarray] | None:
+        """For prompt logprobs, whose leading positions have no entries: the
+        first position with entries, and the entries of it and every later
+        position as engine rows, like `rows`. None unless those positions all
+        have the same number of entries, ranks are canonical and no column
+        was widened."""
+        if (
+            self._ranks is not None
+            or self._token_ids.dtype != np.dtype("<i4")
+            or self._logprobs.dtype != np.dtype("<f4")
+        ):
+            return None
+        bounds = self._bounds(0, len(self))
+        widths = np.diff(bounds)
+        first = int(np.count_nonzero(bounds[1:] == 0))
+        width = int(widths[first]) if first < len(widths) else 0
+        if (widths[first:] != width).any():
+            return None
+        num_rows = len(widths) - first
+        return (
+            first,
+            self._token_ids.view().reshape(num_rows, width),
+            self._logprobs.view().reshape(num_rows, width),
+            self._first_ranks.view()[first:],
+        )
+
     def first_token_ids(self, start: int, stop: int) -> list[int]:
         """Token id of the first entry of each position in `[start, stop)`
         that has entries."""

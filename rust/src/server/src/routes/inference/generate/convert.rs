@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
-use super::types::{GenerateOutputMode, GenerateRequest};
+use super::types::{GenerateOutputMode, GenerateRequest, PromptLogprobsFormat};
 use super::validate;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
@@ -38,6 +38,8 @@ pub(super) struct ResponseOptions {
     pub include_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// Whether prompt logprobs go in `prompt_logprobs_flat`.
+    pub flat_prompt_logprobs: bool,
     /// Whether the caller requested final prompt token metadata.
     pub return_token_ids: bool,
     /// The response level.
@@ -69,6 +71,8 @@ pub(super) fn prepare_generate_request(
             .unwrap_or(false);
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let flat_prompt_logprobs = include_prompt_logprobs
+        && request.prompt_logprobs_format == Some(PromptLogprobsFormat::Flat);
     let return_token_ids = request.return_token_ids.unwrap_or(false);
     let output_mode = request.output_mode.unwrap_or_default();
     let stop_strings = request.sampling_params.stop.map(StringOrArray::into_vec);
@@ -128,6 +132,7 @@ pub(super) fn prepare_generate_request(
             include_continuous_usage,
             include_logprobs,
             include_prompt_logprobs,
+            flat_prompt_logprobs,
             return_token_ids,
             output_mode,
         },

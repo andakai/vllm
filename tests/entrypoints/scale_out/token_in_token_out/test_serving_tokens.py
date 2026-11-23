@@ -362,6 +362,46 @@ async def test_generate_logprobs(client, logprobs_value):
 
 
 @pytest.mark.asyncio
+async def test_generate_flat_prompt_logprobs(client):
+    """The flat format returns the dict format's values as the engine's rows:
+    the prompt token, then the top k."""
+    token_ids = [11, 22, 33, 44, 55]
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": {
+            "max_tokens": 1,
+            "prompt_logprobs": 2,
+            "prompt_logprob_start": 1,
+        },
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    positions = resp.json()["prompt_logprobs"]
+
+    resp = await client.post(
+        GEN_ENDPOINT, json={**payload, "prompt_logprobs_format": "flat"}
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    assert data["prompt_logprobs"] is None
+    flat = data["prompt_logprobs_flat"]
+
+    def load(key: str) -> np.ndarray:
+        return np.load(io.BytesIO(base64.b64decode(flat[key])))
+
+    ids, logprobs, ranks = load("token_ids"), load("logprobs"), load("ranks")
+    assert flat["start"] == 2
+    assert ids.shape == logprobs.shape == (3, 3) and ranks.shape == (3,)
+    assert ids[:, 0].tolist() == token_ids[2:]
+    for row, position in enumerate(positions[2:]):
+        for col in range(3):
+            entry = position[str(ids[row, col])]
+            assert logprobs[row, col] == pytest.approx(entry["logprob"], abs=1e-3)
+        assert ranks[row] == position[str(ids[row, 0])]["rank"]
+
+
+@pytest.mark.asyncio
 async def test_generate_prompt_token_id_logprobs(client):
     token_ids = [11, 22, 33, 44, 55]
     rows = [[33], [44, 100], [55]]

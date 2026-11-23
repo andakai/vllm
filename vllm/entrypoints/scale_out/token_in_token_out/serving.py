@@ -24,7 +24,6 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
-    clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -66,7 +65,11 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
-from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
+from .logprobs_render import (
+    prompt_logprobs_fields,
+    render_json_with_fragments,
+    render_tokens_logprobs,
+)
 from .mm_features import (
     mm_hashes_from_engine_input,
     mm_kwargs_from_features,
@@ -462,12 +465,20 @@ class ServingTokens(GenerateBaseServing):
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
         )
+        flat_prompt_logprobs = (
+            request.prompt_logprobs_format == "flat"
+            and sampling_params.prompt_logprobs is not None
+        )
+        if flat_prompt_logprobs:
+            sampling_params.flat_logprobs = True
+            if request.output_mode == "tokens":
+                sampling_params._detokenize_logprobs = False
         if (
             not request.stream
             and request.output_mode == "tokens"
             and sampling_params.logprobs is not None
             and sampling_params.logprobs >= 0
-            and sampling_params.prompt_logprobs is None
+            and (sampling_params.prompt_logprobs is None or flat_prompt_logprobs)
         ):
             # Keep sample logprobs as rows without decoded tokens, to render
             # them without a Python object per entry (see logprobs_render).
@@ -750,7 +761,9 @@ class ServingTokens(GenerateBaseServing):
             created=created_time,
             model=model_name,
             usage=usage,
-            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            **prompt_logprobs_fields(
+                final_res.prompt_logprobs, request.prompt_logprobs_format
+            ),
             prompt_token_id_logprobs=(
                 numpy2base64(final_res.prompt_token_id_logprobs)
                 if final_res.prompt_token_id_logprobs is not None
