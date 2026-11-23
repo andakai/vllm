@@ -563,7 +563,11 @@ def test_routed_experts_capturer_exposes_output_profile(
             get_num_experts_per_tok=lambda: 2,
             hf_text_config=SimpleNamespace(model_type="test"),
         ),
-        parallel_config=SimpleNamespace(data_parallel_rank=0, tensor_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            data_parallel_rank=0,
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
 
     capturer = RoutedExpertsCapturer(8, config)
