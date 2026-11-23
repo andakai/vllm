@@ -259,6 +259,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
                 "/start_draft_weight_update",
                 post(weight_transfer::start_draft_weight_update),
             )
+            .route(
+                "/start_lora_weight_update",
+                post(weight_transfer::start_lora_weight_update),
+            )
             .route("/update_weights", post(weight_transfer::update_weights))
             .route(
                 "/finish_weight_update",

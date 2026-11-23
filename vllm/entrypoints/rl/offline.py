@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.entrypoints.common.offline import OfflineInferenceMixin
+from vllm.lora.request import LoRARequest
 
 
 class RLOfflineMixin(OfflineInferenceMixin):
@@ -37,6 +40,24 @@ class RLOfflineMixin(OfflineInferenceMixin):
     def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
         self.llm_engine.collective_rpc("start_draft_weight_update")
+
+    def start_lora_weight_update(
+        self, lora_request: LoRARequest, peft_config: dict[str, Any]
+    ) -> None:
+        """Start a weight update that replaces a loaded LoRA adapter's weights.
+
+        The update chunks are the adapter's PEFT tensors; finish_weight_update
+        loads them in place of the adapter.
+        """
+        self.llm_engine.collective_rpc(
+            "start_lora_weight_update",
+            kwargs={
+                "lora_name": lora_request.lora_name,
+                "lora_int_id": lora_request.lora_int_id,
+                "lora_path": lora_request.lora_path,
+                "peft_config": peft_config,
+            },
+        )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """Update the weights of the model.

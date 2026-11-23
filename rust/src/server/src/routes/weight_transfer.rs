@@ -20,6 +20,12 @@ pub(crate) struct InitWeightTransferRequest {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct StartLoraWeightUpdateRequest {
+    lora_name: String,
+    peft_config: serde_json::Map<String, JsonValue>,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct UpdateWeightsRequest {
     update_info: Option<JsonValue>,
 }
@@ -120,6 +126,37 @@ pub async fn start_draft_weight_update(
 
     Ok(Json(MessageResponse {
         message: "Draft weight update started",
+    }))
+}
+
+/// Start replacing the weights of the LoRA adapter loaded under `lora_name`.
+pub async fn start_lora_weight_update(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<StartLoraWeightUpdateRequest>, JsonRejection>,
+) -> Result<Json<MessageResponse>, ApiError> {
+    let Json(body) = body?;
+    let lora = state
+        .served_loras()
+        .await
+        .into_iter()
+        .find(|lora| lora.lora_name == body.lora_name)
+        .ok_or_else(|| ApiError::NotFound {
+            message: format!("LoRA adapter '{}' is not loaded", body.lora_name),
+        })?;
+    let _recorder = METRICS.api_server.record_weight_operation("start_lora");
+    state
+        .engine_core_client()
+        .start_lora_weight_update(
+            &lora.lora_name,
+            lora.lora_int_id,
+            &lora.lora_path,
+            JsonValue::Object(body.peft_config),
+        )
+        .await
+        .map_err(|error| utility_call_error("start_lora_weight_update", error))?;
+
+    Ok(Json(MessageResponse {
+        message: "LoRA weight update started",
     }))
 }
 

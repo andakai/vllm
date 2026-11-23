@@ -72,7 +72,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferEngineFactory,
 )
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, _TensorLoRARequest
 from vllm.model_executor.layers.quantization.online.lm_head import (
     restore_quantized_lm_heads,
     share_source_lm_heads,
@@ -268,6 +268,11 @@ class Worker(WorkerBase):
         # Update targets (is_draft) whose weights may be incomplete.
         self._incomplete_weight_updates: set[bool] = set()
         self._weight_update_is_draft = False
+        # The adapter an active LoRA weight update replaces, and its PEFT config.
+        self._lora_weight_update: tuple[str, int, str, dict[str, Any]] | None = None
+        # One target for every LoRA update: engines key cached update metadata
+        # by target.
+        self._lora_weight_receiver = _LoRAWeightReceiver()
         # Set by the engine while a pause has emptied the KV cache.
         self._kv_cache_reclaimable = False
         # Keeps the KV cache lent to the active weight update until it ends.
@@ -1745,6 +1750,69 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self._start_weight_update(is_draft=True)
 
+    def start_lora_weight_update(
+        self,
+        lora_name: str,
+        lora_int_id: int,
+        lora_path: str,
+        peft_config: dict[str, Any],
+    ) -> None:
+        """Start a weight update that replaces a loaded LoRA adapter.
+
+        The chunks sent with update_weights are the adapter's PEFT tensors;
+        finish_weight_update loads them in place of the adapter and pins it,
+        so it is never reloaded from its original path. The base model is not
+        touched.
+        """
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        # Engines that can retarget a draft model load through the target's
+        # load_weights, which the receiver implements.
+        if not self.weight_transfer_engine.supports_draft_weight_update:
+            raise RuntimeError(
+                f"{type(self.weight_transfer_engine).__name__} does not support "
+                "LoRA weight updates."
+            )
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_lora_weight_update called while a weight update is already "
+                "active. Call finish_weight_update first."
+            )
+        if lora_int_id not in self.list_loras():
+            raise RuntimeError(
+                f"LoRA adapter {lora_name!r} (id {lora_int_id}) is not loaded; "
+                "load it before updating its weights."
+            )
+        self._lora_weight_receiver.tensors = {}
+        self.weight_transfer_engine.set_weight_update_target(
+            self._lora_weight_receiver, self.vllm_config.model_config
+        )
+        self._lora_weight_update = (lora_name, lora_int_id, lora_path, peft_config)
+        self._weight_update_active = True
+        self._weight_update_is_draft = False
+
+    def _finish_lora_weight_update(self) -> None:
+        assert self._lora_weight_update is not None
+        lora_name, lora_int_id, lora_path, peft_config = self._lora_weight_update
+        tensors = self._lora_weight_receiver.tensors
+        self._lora_weight_receiver.tensors = {}
+        try:
+            if not tensors:
+                raise RuntimeError("No LoRA tensors were received.")
+            self.add_lora(
+                _TensorLoRARequest(
+                    lora_name=lora_name,
+                    lora_int_id=lora_int_id,
+                    lora_path=lora_path,
+                    load_inplace=True,
+                    _lora_tensors=tensors,
+                    _peft_config=peft_config,
+                )
+            )
+            self.pin_lora(lora_int_id)
+        finally:
+            self._end_weight_update(refresh=False)
+
     def _start_weight_update(self, is_draft: bool = False) -> None:
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1840,6 +1908,7 @@ class Worker(WorkerBase):
     def _end_weight_update(self, refresh: bool) -> None:
         assert self.weight_transfer_engine is not None
         self._weight_update_active = False
+        self._lora_weight_update = None
         self._weight_update_kv_cache_loan.close()
         self.weight_transfer_engine.reset_weight_update_target()
         if self._weight_update_is_draft and (
@@ -1856,6 +1925,9 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 "finish_weight_update called without a matching start_weight_update."
             )
+        if self._lora_weight_update is not None:
+            self._finish_lora_weight_update()
+            return
 
         with set_current_vllm_config(self.vllm_config):
             try:
@@ -1952,3 +2024,20 @@ def init_worker_distributed_environment(
     # Init ec connector here before KV caches init
     # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
     ensure_ec_transfer_initialized(vllm_config)
+
+
+class _LoRAWeightReceiver(nn.Module):
+    """Weight update target that keeps the LoRA tensors it receives."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tensors: dict[str, torch.Tensor] = {}
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        names = set()
+        for name, tensor in weights:
+            # A CPU copy: transfer buffers are reused for the next chunk, and
+            # LoRA adapters are built on the CPU.
+            self.tensors[name] = tensor.to("cpu", copy=True)
+            names.add(name)
+        return names
