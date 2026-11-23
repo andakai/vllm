@@ -949,6 +949,84 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// With an admin API key, control routes accept only that key, even under
+/// `/v1`, and the other routes keep their API-key behavior.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn admin_api_key_guards_control_routes() {
+    async fn status(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+    ) -> StatusCode {
+        let mut request = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let request = request.body(Body::empty()).expect("build request");
+        app.clone().call(request).await.expect("call app").status()
+    }
+
+    for api_keys in [vec!["user".to_string()], vec![]] {
+        let with_api_key = !api_keys.is_empty();
+        let (chat, engine_task) = test_chat_with_engine_handle().await;
+        let app = build_router_with_gates(
+            Arc::new(
+                AppState::new(vec!["model".to_string()], chat)
+                    .with_api_keys(api_keys)
+                    .with_admin_api_key(Some("admin")),
+            ),
+            RouteGates {
+                dev_mode: true,
+                runtime_lora_updating: true,
+                ..RouteGates::default()
+            },
+        );
+
+        for (method, uri) in [
+            ("GET", "/get_world_size"),
+            ("POST", "/v1/load_lora_adapter"),
+        ] {
+            assert_eq!(
+                status(&app, method, uri, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                status(&app, method, uri, Some("user")).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_ne!(
+                status(&app, method, uri, Some("admin")).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            status(&app, "GET", "/get_world_size", Some("admin")).await,
+            StatusCode::OK
+        );
+
+        for token in [None, Some("admin")] {
+            let unauthorized =
+                status(&app, "GET", "/v1/models", token).await == StatusCode::UNAUTHORIZED;
+            assert_eq!(
+                unauthorized, with_api_key,
+                "{token:?} with_api_key={with_api_key}"
+            );
+        }
+        assert_eq!(
+            status(&app, "GET", "/v1/models", Some("user")).await,
+            StatusCode::OK
+        );
+        assert_ne!(
+            status(&app, "GET", "/health", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        engine_task.abort_and_join().await;
+    }
+}
+
 /// `VLLM_SERVER_DEV_MODE` reaches the router through `ApiServerOptions`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]

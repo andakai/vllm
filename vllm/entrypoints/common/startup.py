@@ -47,7 +47,9 @@ VLLM_SUBCMD_PARSER_EPILOG = (
 
 
 # Fields whose values must never be logged verbatim.
-_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token", "watermark_config"})
+_SENSITIVE_ARG_FIELDS = frozenset(
+    {"api_key", "admin_api_key", "hf_token", "watermark_config"}
+)
 
 
 def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:

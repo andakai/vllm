@@ -52,6 +52,8 @@ pub struct AppState {
     server_info: Option<ServerInfoSnapshot>,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
     api_key_hashes: Vec<ApiKeyHash>,
+    /// SHA-256 hash of the admin API key, which alone reaches control routes.
+    admin_api_key_hash: Option<ApiKeyHash>,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
@@ -88,6 +90,7 @@ impl AppState {
             access_log: AccessLogConfig::default(),
             server_info: None,
             api_key_hashes: Vec::new(),
+            admin_api_key_hash: None,
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
             model_path: None,
@@ -169,6 +172,16 @@ impl AppState {
 
     pub(crate) fn api_key_hashes(&self) -> &[ApiKeyHash] {
         &self.api_key_hashes
+    }
+
+    /// Configure the admin API key for control routes.
+    pub fn with_admin_api_key(mut self, admin_api_key: Option<&str>) -> Self {
+        self.admin_api_key_hash = admin_api_key.filter(|key| !key.is_empty()).map(hash_api_key);
+        self
+    }
+
+    pub(crate) fn admin_api_key_hash(&self) -> Option<&ApiKeyHash> {
+        self.admin_api_key_hash.as_ref()
     }
 
     /// The primary model name echoed back in API responses (the first served

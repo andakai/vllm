@@ -202,6 +202,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_system_fingerprint(system_fingerprint)
             .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
+            .with_admin_api_key(config.admin_api_key.as_deref())
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
             .with_profiler(config.profiler.clone())

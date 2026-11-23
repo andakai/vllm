@@ -15,6 +15,7 @@ from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.serve.middleware.authenticate import (
     GUARDED_PREFIX,
     AuthenticationMiddleware,
+    admin_routes,
 )
 from vllm.tasks import POOLING_TASKS, SupportedTask
 
@@ -153,3 +154,66 @@ def test_auto_discovered_unprotected_routes_no_auth(task_routes):
         assert resp.status_code == 200, (
             f"[{task}] {test_method} {test_path} should be accessible without token"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for --admin-api-key
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def control_app(monkeypatch) -> FastAPI:
+    """The generate task's real routes, dev mode and runtime LoRA updating on."""
+    monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
+    monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "1")
+    app = FastAPI()
+    app.state = Namespace()
+    app.state.args = Namespace()
+    register_api_routers(
+        app.state.args, app, supported_tasks=("generate",), model_config=MockModelConfig()
+    )
+    return app
+
+
+def test_admin_routes_are_the_control_endpoints(control_app):
+    paths = {route.path for route in admin_routes(control_app.routes)}
+    assert {
+        "/pause",
+        "/update_weights",
+        "/weight_checker",
+        "/collective_rpc",
+        "/sleep",
+        "/reset_prefix_cache",
+        "/v1/load_lora_adapter",
+        "/checkpoint/prepare",
+        "/scale_elastic_ep",
+    } <= paths
+    assert not paths & {"/v1/completions", "/v1/models", "/health", "/metrics"}
+
+
+@pytest.mark.parametrize("api_keys", [["user"], []], ids=["with-api-key", "admin-only"])
+def test_admin_key_guards_control_routes(control_app, api_keys):
+    """Control routes accept only the admin key, even under /v1; the other
+    routes keep their --api-key behavior."""
+    control_app.add_middleware(
+        AuthenticationMiddleware,
+        tokens=api_keys,
+        admin_tokens=["admin"],
+        admin_routes=admin_routes(control_app.routes),
+    )
+    client = TestClient(control_app, raise_server_exceptions=False)
+
+    def status(method: str, path: str, token: str | None) -> int:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        return client.request(method, path, headers=headers).status_code
+
+    for method, path in [("POST", "/pause"), ("POST", "/v1/load_lora_adapter")]:
+        assert status(method, path, None) == 401
+        assert status(method, path, "user") == 401
+        # Past authentication; the handler fails without an engine.
+        assert status(method, path, "admin") != 401
+
+    for token in [None, "admin"]:
+        assert (status("POST", "/v1/completions", token) == 401) == bool(api_keys)
+    assert status("POST", "/v1/completions", "user") != 401
+    assert status("GET", "/health", None) != 401

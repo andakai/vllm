@@ -345,6 +345,11 @@ class FrontendArgs(BaseFrontendArgs):
     alone to secure vLLM; see
     https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
     for what it does and does not protect."""
+    admin_api_key: str | None = None
+    """If provided, the control endpoints (development and RL endpoints such as
+    `/pause` and `/update_weights`, runtime LoRA loading, profiling, process
+    checkpoints and elastic EP scaling) accept only this key, and `--api-key`
+    keys do not reach them. Defaults to `VLLM_ADMIN_API_KEY`."""
     ssl_keyfile: str | None = None
     """The file path to the SSL key file."""
     ssl_certfile: str | None = None

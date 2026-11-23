@@ -429,6 +429,11 @@ pub struct Config {
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
+    /// API key accepted as the bearer token for control routes, instead of
+    /// `api_keys`.
+    #[serde(skip_serializing)]
+    #[educe(Debug(method(fmt_redacted_admin_api_key)))]
+    pub admin_api_key: Option<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage). Engines also stop recording stats, so metrics derived from
     /// engine-reported scheduler stats and request lifecycle events are not
@@ -549,6 +554,13 @@ impl fmt::Debug for RedactedApiKeys<'_> {
 
 fn fmt_redacted_api_keys(api_keys: &[String], f: &mut fmt::Formatter<'_>) -> fmt::Result {
     fmt::Debug::fmt(&RedactedApiKeys(api_keys), f)
+}
+
+fn fmt_redacted_admin_api_key(key: &Option<String>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match key {
+        Some(_) => f.write_str("Some(<redacted>)"),
+        None => f.write_str("None"),
+    }
 }
 
 #[cfg(test)]

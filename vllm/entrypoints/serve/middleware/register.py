@@ -30,10 +30,17 @@ def init_entrypoints_middleware(
     )
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
-    if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
-        from .authenticate import AuthenticationMiddleware
+    tokens = [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]
+    admin_key = getattr(args, "admin_api_key", None) or envs.VLLM_ADMIN_API_KEY
+    if tokens or admin_key:
+        from .authenticate import AuthenticationMiddleware, admin_routes
 
-        app.add_middleware(AuthenticationMiddleware, tokens=tokens)
+        app.add_middleware(
+            AuthenticationMiddleware,
+            tokens=tokens,
+            admin_tokens=[admin_key] if admin_key else [],
+            admin_routes=admin_routes(app.routes),
+        )
 
     if args.enable_request_id_headers:
         from .x_request_id import XRequestIdMiddleware

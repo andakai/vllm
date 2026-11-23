@@ -673,6 +673,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub api_key: Vec<String>,
 
+    /// If provided, the control endpoints (development and RL endpoints such as
+    /// `/pause` and `/update_weights`, runtime LoRA loading, profiling, process
+    /// checkpoints and elastic EP scaling) accept only this key, and
+    /// `--api-key` keys do not reach them.
+    #[educe(Debug(ignore))]
+    #[arg(long, env = "VLLM_ADMIN_API_KEY")]
+    #[serde(default)]
+    pub admin_api_key: Option<String>,
+
     /// Disable periodic logging of engine statistics (throughput, queue depth,
     /// cache usage). Engines also stop recording stats, so metrics derived from
     /// engine-reported scheduler stats and request lifecycle events are not
@@ -995,6 +1004,9 @@ impl SharedRuntimeArgs {
         {
             self.api_key.push(api_key);
         }
+        if self.admin_api_key.is_none() {
+            self.admin_api_key = lookup("VLLM_ADMIN_API_KEY");
+        }
         if let Some(value) = lookup("VLLM_LOG_STATS_INTERVAL") {
             let interval = value
                 .parse()
@@ -1114,6 +1126,7 @@ impl SharedRuntimeArgs {
             tls,
             root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
+            admin_api_key: self.admin_api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
@@ -1208,6 +1221,7 @@ impl SharedRuntimeArgs {
             tls,
             root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
+            admin_api_key: self.admin_api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
