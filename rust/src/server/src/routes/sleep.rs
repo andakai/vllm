@@ -48,6 +48,9 @@ pub(crate) struct SleepParams {
         deserialize_with = "deserialize_query_bool"
     )]
     reset_connector: bool,
+    /// Back the KV cache up to host memory instead of discarding it.
+    #[serde(default, deserialize_with = "deserialize_query_bool")]
+    keep_kv_cache: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,12 +79,13 @@ pub async fn sleep(
         level,
         mode,
         reset_connector,
+        keep_kv_cache,
     }) = params?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state
         .engine_core_client()
-        .sleep(level, mode, reset_connector)
+        .sleep(level, mode, reset_connector, keep_kv_cache)
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
 
