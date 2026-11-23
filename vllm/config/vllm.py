@@ -1435,10 +1435,6 @@ class VllmConfig:
             raise ValueError(
                 "sampling distribution replay does not support diffusion models"
             )
-        if model_config.logits_processors:
-            raise ValueError(
-                "sampling distribution replay does not support custom logits processors"
-            )
         if model_config.logprobs_mode != "processed_logprobs":
             raise ValueError(
                 "sampling distribution replay requires "

@@ -347,10 +347,7 @@ def _sampling_replay_config(
             _sampling_replay_config(is_diffusion=True),
             "does not support diffusion models",
         ),
-        (
-            _sampling_replay_config(logits_processors=["custom"]),
-            "does not support custom logits processors",
-        ),
+        (_sampling_replay_config(logits_processors=["custom"]), None),
         (
             _sampling_replay_config(logprobs_mode="raw_logprobs"),
             "requires logprobs_mode='processed_logprobs'",

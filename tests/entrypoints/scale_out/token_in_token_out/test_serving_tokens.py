@@ -4,6 +4,8 @@
 import asyncio
 import io
 import json
+import os
+from pathlib import Path
 
 import httpx
 import numpy as np
@@ -17,10 +19,19 @@ import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
 from vllm.v1.engine.detokenizer import check_stop_strings
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsProcessor
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 GEN_ENDPOINT = "/inference/v1/generate"
 ABORT_ENDPOINT = "/inference/v1/abort_requests"
+
+
+class BanEvenTokensProcessor(LogitsProcessor):
+    """Sets the logits of all even token IDs to -inf."""
+
+    def apply(self, logits, ctx):
+        logits[:, ::2] = float("-inf")
+        return logits
 
 
 def get_vocab_size(model_name):
@@ -85,7 +96,12 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # `vllm serve` must import test-defined `--logits-processors` by name.
+    repo_root = str(Path(__file__).resolve().parents[4])
+    pythonpath = os.pathsep.join(filter(None, [repo_root, os.getenv("PYTHONPATH")]))
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict={"PYTHONPATH": pythonpath}
+    ) as remote_server:
         yield remote_server
 
 
@@ -165,10 +181,20 @@ async def test_generate_rejects_min_tokens_above_server_cap(client):
 )
 @pytest.mark.parametrize(
     "server",
-    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    [
+        ["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"],
+        [
+            "--return-sampling-mask",
+            "--logprobs-mode",
+            "processed_logprobs",
+            "--logits-processors",
+            f"{__name__}:BanEvenTokensProcessor",
+        ],
+    ],
     indirect=True,
 )
-async def test_generate_sampling_mask(client):
+async def test_generate_sampling_mask(request, client):
+    ban_even = "--logits-processors" in request.node.callspec.params["server"]
     top_k = 5
     payload = {
         "model": MODEL_NAME,
@@ -200,6 +226,8 @@ async def test_generate_sampling_mask(client):
         assert len(support) == len(set(support))
         assert all(0 <= support_token_id < vocab_size for support_token_id in support)
         assert token_id in support
+        if ban_even:
+            assert all(support_token_id % 2 for support_token_id in support)
         # processed_logprobs: exactly the support carries finite probability.
         for top in entry["top_logprobs"]:
             in_support = top["token_id"] in support
