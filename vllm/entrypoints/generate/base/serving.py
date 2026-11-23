@@ -7,7 +7,7 @@ from typing import TypeVar
 
 from fastapi import Request
 
-from vllm import RequestOutput
+from vllm import CompletionOutput, RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MAX,
@@ -106,6 +106,16 @@ def build_spec_decoding_metrics(
         return None
     metrics = final_res.outputs[0].spec_decode_metrics
     if metrics is None:
+        return None
+    return SpeculativeDecodingMetrics(**metrics.to_dict())
+
+
+def choice_spec_decoding_metrics(
+    output: CompletionOutput, n: int
+) -> SpeculativeDecodingMetrics | None:
+    """One sequence's spec-decode metrics, for requests with `n > 1`."""
+    metrics = output.spec_decode_metrics
+    if n == 1 or metrics is None:
         return None
     return SpeculativeDecodingMetrics(**metrics.to_dict())
 

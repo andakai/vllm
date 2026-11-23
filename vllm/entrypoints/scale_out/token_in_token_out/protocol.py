@@ -24,6 +24,7 @@ from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MIN,
     DeltaMessage,
     PerRequestMetrics,
+    SpeculativeDecodingMetrics,
     StreamOptions,
     validate_cache_salt,
 )
@@ -537,6 +538,9 @@ class GenerateChoiceBase(BaseModel):
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
+    # This sequence's speculative-decoding metrics for `n > 1`; with `n == 1`
+    # they are in the response's `metrics.speculative_decoding`.
+    speculative_decoding: SpeculativeDecodingMetrics | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -574,6 +578,8 @@ class GenerateStreamChoiceBase(BaseModel):
     sampling_mask: list[list[int]] | None = None
     # Set on the final chunk only; covers the whole output.
     weight_versions: list[WeightVersionSpan] | None = None
+    # Set on this choice's final chunk for `n > 1`; see `GenerateChoiceBase`.
+    speculative_decoding: SpeculativeDecodingMetrics | None = None
 
 
 class GenerateTokensStreamChoice(GenerateStreamChoiceBase):
