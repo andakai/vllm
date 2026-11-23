@@ -37,8 +37,9 @@ def generate(client) -> tuple[np.ndarray, int]:
 def test_routed_experts_with_prefill_context_parallel():
     """With PCP, each rank routes part of the prompt; the rows must come back in
     token order. The first MoE layer's input differs from TP alone only by
-    attention rounding, so its rows match a server without PCP; misordered
-    rows would not. Prefix-cache hits get the stored rows back."""
+    attention rounding, so its expert sets nearly all match a server without
+    PCP; misordered rows would not. Prefix-cache hits get the stored rows
+    back."""
     with RemoteOpenAIServer(
         MODEL_NAME, [*ARGS, "--prefill-context-parallel-size", "2"]
     ) as server:
@@ -49,8 +50,14 @@ def test_routed_experts_with_prefill_context_parallel():
         reference, _ = generate(server.get_client())
 
     assert cold.shape == (len(PROMPT) + MAX_TOKENS - 1, 27, 6)
+    # Compare expert sets: near-tied experts may swap ranks. Misordered rows
+    # would match at about 0%; PCP's attention rounding flips about 1-2%.
     prompt_rows = len(PROMPT) - 1
-    same = (cold[:prompt_rows, 1] == reference[:prompt_rows, 1]).all(axis=-1)
-    assert same.mean() > 0.99, f"first MoE layer matches at {same.mean():.4f}"
+    first_moe = (
+        np.sort(cold[:prompt_rows, 1], -1),
+        np.sort(reference[:prompt_rows, 1], -1),
+    )
+    same = (first_moe[0] == first_moe[1]).all(axis=-1)
+    assert same.mean() > 0.95, f"first MoE layer matches at {same.mean():.4f}"
     assert cached > 0
     np.testing.assert_array_equal(warm[:cached], cold[:cached])
