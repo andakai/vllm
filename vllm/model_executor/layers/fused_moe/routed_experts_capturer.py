@@ -104,13 +104,17 @@ class RoutedExpertsCapturer:
             num_experts_per_tok,
             vllm_config.model_config.hf_text_config.model_type,
         )
+        # With PCP, the MoE may route all ranks' tokens; the model runner then
+        # restores the global token order in place (see PCPManager).
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.device_buffer = torch.zeros(
-            (max_num_batched_tokens, *self.shape_per_token),
+            (max_num_batched_tokens * pcp_size, *self.shape_per_token),
             dtype=torch.int32,
             device=current_platform.device_type,
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.restore_rows: Callable[[torch.Tensor, ForwardContext], torch.Tensor] = (
             self._restore_local_topk_ids
         )
@@ -136,7 +140,8 @@ class RoutedExpertsCapturer:
 
         Layout priority: cross-DP batch, local batch, gathered DP/TP shards,
         then a local TP shard. Gathered rows are DP-major/TP-minor; preserve
-        this priority when layout sizes coincide. PCP is unsupported.
+        this priority when layout sizes coincide. PCP-gathered rows are kept
+        as they are; the model runner restores their order.
 
         Without DP metadata, use the pre-SP batch descriptor. Unknown counts
         pass through; known counts must match a full, sharded or padded batch.
@@ -156,7 +161,9 @@ class RoutedExpertsCapturer:
                 end = int(num_tokens_dp[: self.dp_rank + 1].sum().item())
                 return topk_ids[end - num_local_tokens : end]
 
-        if n == num_local_tokens:
+        if n == num_local_tokens or n == num_local_tokens * self.pcp_size:
+            # A local batch, or the PCP-gathered batch, which the model runner
+            # restores to global order after the forward.
             return topk_ids
 
         if dp_metadata is not None:

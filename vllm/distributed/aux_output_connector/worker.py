@@ -38,6 +38,7 @@ from vllm.utils.math_utils import round_up
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
 @dataclass(slots=True)
@@ -135,6 +136,16 @@ class AuxOutputWorkerConnector:
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
+
+    def restore_pcp_rows(self, pcp_manager: PCPManager, num_local_tokens: int) -> None:
+        """Reorder this step's captured rows into the global batch's token
+        order. Collective over the PCP group, so every rank calls it."""
+        buffer = self._capturer.device_buffer
+        num_rows = num_local_tokens * (
+            pcp_manager.pcp_world_size if pcp_manager.moe_gathers_tokens else 1
+        )
+        restored = pcp_manager.restore_moe_rows(buffer[:num_rows], num_local_tokens)
+        buffer[: restored.shape[0]] = restored
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""

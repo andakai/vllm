@@ -1315,13 +1315,10 @@ class VllmConfig:
                 "--enable-return-routed-experts is incompatible with "
                 "pipeline parallelism (PP > 1)."
             )
-        if (
-            self.parallel_config.decode_context_parallel_size > 1
-            or self.parallel_config.prefill_context_parallel_size > 1
-        ):
+        if self.parallel_config.decode_context_parallel_size > 1:
             raise ValueError(
                 "--enable-return-routed-experts is incompatible with "
-                "context parallelism (DCP/PCP > 1)."
+                "decode context parallelism (DCP > 1)."
             )
 
     def _verify_direct_reload_compat(self) -> None:
