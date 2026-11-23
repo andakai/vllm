@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::Json;
@@ -15,20 +16,41 @@ use crate::state::{ApiKeyHash, AppState, hash_api_key};
 
 const GUARDED_PREFIXES: &[&str] = &["/v1", "/v2", "/inference"];
 
+/// The app state plus the control routes' paths, which an admin API key guards.
+#[derive(Clone)]
+pub struct AuthState {
+    app: Arc<AppState>,
+    control_paths: Arc<HashSet<&'static str>>,
+}
+
+impl AuthState {
+    pub fn new(app: Arc<AppState>, control_paths: HashSet<&'static str>) -> Self {
+        Self {
+            app,
+            control_paths: Arc::new(control_paths),
+        }
+    }
+}
+
 /// Authenticate guarded HTTP routes with an OpenAI-compatible bearer token.
 ///
 /// Mirrors Python `AuthenticationMiddleware`: OPTIONS requests and non-guarded
 /// helper endpoints such as `/health` are allowed through without a token.
-pub async fn authenticate_api_key(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    if req.method() == Method::OPTIONS || !requires_auth(req.uri().path()) {
+/// With an admin API key, control routes accept only that key.
+pub async fn authenticate(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
+    if req.method() == Method::OPTIONS {
         return next.run(req).await;
     }
-
-    if verify_token(req.headers().get(AUTHORIZATION), state.api_key_hashes()) {
+    let path = req.uri().path();
+    let authorization = req.headers().get(AUTHORIZATION);
+    let authorized = match auth.app.admin_api_key_hash() {
+        Some(admin_key_hash) if auth.control_paths.contains(path) => {
+            verify_token(authorization, std::slice::from_ref(admin_key_hash))
+        }
+        _ if !auth.app.has_api_keys() || !requires_auth(path) => true,
+        _ => verify_token(authorization, auth.app.api_key_hashes()),
+    };
+    if authorized {
         return next.run(req).await;
     }
 

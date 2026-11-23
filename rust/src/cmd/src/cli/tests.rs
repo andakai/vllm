@@ -3796,6 +3796,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tls: None,
             root_path: None,
             api_keys: [],
+            admin_api_key: None,
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
                 {},
@@ -3934,6 +3935,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tls: None,
             root_path: None,
             api_keys: [],
+            admin_api_key: None,
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
                 {},
@@ -4185,6 +4187,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tls: None,
             root_path: None,
             api_keys: [],
+            admin_api_key: None,
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
                 {},

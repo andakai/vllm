@@ -25,6 +25,7 @@ mod weight_checker;
 mod weight_transfer;
 mod world_size;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
@@ -151,9 +152,6 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         // TODO: implement the decisions APIs.
         .route("/v1/decisions", post(not_supported))
         .route("/v1/systemone", post(not_supported))
-        // TODO: implement elastic EP scaling.
-        .route("/scale_elastic_ep", post(not_supported))
-        .route("/is_scaling_elastic_ep", post(not_supported))
         .route("/v1/responses", post(openai::create_responses))
         .route(
             "/v1/responses/{response_id}",
@@ -217,6 +215,13 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         router = router.route("/tokenizer_info", get(not_supported));
     }
 
+    // Control routes: with `--admin-api-key`, they accept only that key.
+    let mut control_routes: Vec<(&'static str, MethodRouter<Arc<AppState>>)> = vec![
+        // TODO: implement elastic EP scaling.
+        ("/scale_elastic_ep", post(not_supported)),
+        ("/is_scaling_elastic_ep", post(not_supported)),
+    ];
+
     // Process checkpoint lifecycle, which requires sleep mode.
     if state
         .engine_core_client()
@@ -224,65 +229,68 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .iter()
         .all(|ready| ready.enable_sleep_mode)
     {
-        router = router
-            .route("/checkpoint/prepare", post(checkpoint::prepare))
-            .route("/checkpoint/restore", post(checkpoint::restore))
-            .route("/checkpoint/status", get(checkpoint::status));
+        control_routes.extend([
+            ("/checkpoint/prepare", post(checkpoint::prepare)),
+            ("/checkpoint/restore", post(checkpoint::restore)),
+            ("/checkpoint/status", get(checkpoint::status)),
+        ]);
     }
 
     if gates.runtime_lora_updating {
-        router = router
-            .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))
-            .route("/v1/unload_lora_adapter", post(lora::unload_lora_adapter));
+        control_routes.extend([
+            ("/v1/load_lora_adapter", post(lora::load_lora_adapter)),
+            ("/v1/unload_lora_adapter", post(lora::unload_lora_adapter)),
+        ]);
     }
 
     if gates.dev_mode {
         // Development-only
-        router = router
-            .route("/reset_prefix_cache", post(cache::reset_prefix_cache))
-            .route("/reset_mm_cache", post(cache::reset_mm_cache))
-            .route("/reset_encoder_cache", post(cache::reset_encoder_cache))
-            .route("/collective_rpc", post(collective_rpc::collective_rpc))
-            .route(
+        control_routes.extend([
+            ("/reset_prefix_cache", post(cache::reset_prefix_cache)),
+            ("/reset_mm_cache", post(cache::reset_mm_cache)),
+            ("/reset_encoder_cache", post(cache::reset_encoder_cache)),
+            ("/collective_rpc", post(collective_rpc::collective_rpc)),
+            (
                 "/init_weight_transfer_engine",
                 post(weight_transfer::init_weight_transfer_engine),
-            )
-            .route(
+            ),
+            (
                 "/shutdown_weight_transfer_engine",
                 post(weight_transfer::shutdown_weight_transfer_engine),
-            )
-            .route(
+            ),
+            (
                 "/start_weight_update",
                 post(weight_transfer::start_weight_update),
-            )
-            .route(
+            ),
+            (
                 "/start_draft_weight_update",
                 post(weight_transfer::start_draft_weight_update),
-            )
-            .route("/update_weights", post(weight_transfer::update_weights))
-            .route(
+            ),
+            ("/update_weights", post(weight_transfer::update_weights)),
+            (
                 "/finish_weight_update",
                 post(weight_transfer::finish_weight_update),
-            )
-            .route(
+            ),
+            (
                 "/update_weight_version",
                 post(weight_transfer::update_weight_version),
-            )
-            .route("/weight_info", get(weight_transfer::weight_info))
-            .route("/weight_checker", post(weight_checker::weight_checker))
-            .route("/abort_requests", post(abort_requests::abort_requests))
-            .route("/sleep", post(sleep::sleep))
-            .route(
+            ),
+            ("/weight_info", get(weight_transfer::weight_info)),
+            ("/weight_checker", post(weight_checker::weight_checker)),
+            ("/abort_requests", post(abort_requests::abort_requests)),
+            ("/sleep", post(sleep::sleep)),
+            (
                 "/release_kv_cache_memory",
                 post(sleep::release_kv_cache_memory),
-            )
-            .route("/wake_up", post(sleep::wake_up))
-            .route("/is_sleeping", get(sleep::is_sleeping))
-            .route("/pause", post(pause::pause))
-            .route("/resume", post(pause::resume))
-            .route("/is_paused", get(pause::is_paused))
-            .route("/server_info", get(server_info::server_info))
-            .route("/get_world_size", get(world_size::get_world_size))
+            ),
+            ("/wake_up", post(sleep::wake_up)),
+            ("/is_sleeping", get(sleep::is_sleeping)),
+            ("/pause", post(pause::pause)),
+            ("/resume", post(pause::resume)),
+            ("/is_paused", get(pause::is_paused)),
+            ("/server_info", get(server_info::server_info)),
+            ("/get_world_size", get(world_size::get_world_size)),
+        ]);
     }
 
     if let Some(profiler) = &state.profiler {
@@ -291,14 +299,21 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
             "profiler is enabled in the API server; \
              this should only be used for local development",
         );
-        router = router
-            .route("/start_profile", post(profile::start_profile))
-            .route("/stop_profile", post(profile::stop_profile));
+        control_routes.extend([
+            ("/start_profile", post(profile::start_profile)),
+            ("/stop_profile", post(profile::stop_profile)),
+        ]);
+    }
+
+    let control_paths: HashSet<&'static str> =
+        control_routes.iter().map(|(path, _)| *path).collect();
+    for (path, handler) in control_routes {
+        router = router.route(path, handler);
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
     let log_error_stack = state.api_server_options.log_error_stack;
-    let enable_api_key_auth = state.has_api_keys();
+    let enable_auth = state.has_api_keys() || state.admin_api_key_hash().is_some();
     let enable_access_log = state.access_log.enabled;
     let mut router = router
         .with_state(state.clone())
@@ -319,10 +334,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         router = router.layer(from_fn(middleware::log_error_response));
     }
 
-    if enable_api_key_auth {
+    if enable_auth {
         router = router.layer(from_fn_with_state(
-            state.clone(),
-            middleware::authenticate_api_key,
+            middleware::AuthState::new(state.clone(), control_paths),
+            middleware::authenticate,
         ));
     }
 

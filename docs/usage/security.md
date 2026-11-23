@@ -280,7 +280,18 @@ Similarly, never enable profiler endpoints in production.
 
 **Be cautious with `--enable-tokenizer-info-endpoint`:** Only enable the `/tokenizer_info` endpoint if you need to expose tokenizer configuration information. This endpoint reveals chat templates and tokenizer settings that may contain sensitive implementation details or prompt engineering strategies.
 
-#### 2. Deploy Behind a Reverse Proxy
+#### 2. Separate the Control Endpoints with an Admin Key
+
+`--admin-api-key` (or `VLLM_ADMIN_API_KEY`) gives the control endpoints their own key. When it is set, these endpoints accept only that key, whatever their path prefix, and the `--api-key` keys no longer reach them:
+
+- development endpoints enabled by `VLLM_SERVER_DEV_MODE=1`, including the RL endpoints (`/pause`, `/resume`, `/abort_requests`, the weight transfer and update endpoints, `/weight_checker`), `/collective_rpc`, the cache reset endpoints, `/sleep`, `/wake_up` and `/server_info`;
+- `/v1/load_lora_adapter` and `/v1/unload_lora_adapter`;
+- `/start_profile` and `/stop_profile`;
+- `/checkpoint/*`, `/scale_elastic_ep` and `/is_scaling_elastic_ep`.
+
+The other endpoints keep their `--api-key` behavior. Use this when inference clients and a trainer share one server: give inference clients an `--api-key` key and the trainer the admin key. The admin key does not make the development endpoints safe to expose; keep them on a private network.
+
+#### 3. Deploy Behind a Reverse Proxy
 
 The most effective approach is to deploy vLLM behind a reverse proxy (such as nginx, Envoy, or a Kubernetes Gateway) that:
 

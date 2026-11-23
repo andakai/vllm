@@ -63,6 +63,8 @@ With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionali
 - `POST /update_weight_version` - Set the `weight_version` label without changing weights (send `{"new_version": "v8"}`)
 - `GET /weight_info` - Return the latest committed `weight_version`
 
+These endpoints are not covered by `--api-key`. To require a key for them, start the server with `--admin-api-key` (or `VLLM_ADMIN_API_KEY`) and send it as `Authorization: Bearer <key>`; see [Separate the Control Endpoints with an Admin Key](../usage/security.md#2-separate-the-control-endpoints-with-an-admin-key).
+
 !!! note "Data Parallelism"
     When using data parallelism with vLLM's **internal load balancer** (i.e. `data_parallel_backend="ray"`), pause and resume are handled automatically across all DP ranks -- a single call is sufficient. When using an **external load balancer** (i.e. multiple independent vLLM instances behind a proxy), you must send pause and resume requests to **every** engine instance individually before and after the weight update, and set the weight version on every instance too.
 
