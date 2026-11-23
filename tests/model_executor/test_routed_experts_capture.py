@@ -57,6 +57,7 @@ def _capturer_with_buffer(
     num_experts_per_tok: int = 2,
     dp_rank: int = 0,
     tp_size: int = 1,
+    pcp_size: int = 1,
     dtype: torch.dtype = torch.int32,
 ) -> RoutedExpertsCapturer:
     # Bypass __init__ so the test can use a CPU buffer and skip the
@@ -65,6 +66,7 @@ def _capturer_with_buffer(
     c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     c.dp_rank = dp_rank
     c.tp_size = tp_size
+    c.pcp_size = pcp_size
     c.restore_rows = c._restore_local_topk_ids
     c.output_dtype = torch.uint8
     c.device_buffer = torch.full(
@@ -896,3 +898,14 @@ def test_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+def test_capture_keeps_pcp_gathered_rows():
+    """With PCP, an MoE that gathers tokens routes every rank's rows; they are
+    kept as they are for the model runner to reorder."""
+    capturer = _capturer_with_buffer(max_tokens=8, pcp_size=2)
+    ids = torch.arange(12, dtype=torch.int32).view(6, 2)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=3))
+    with override_forward_context(ctx):
+        capturer.capture(0, ids)
+    torch.testing.assert_close(capturer.device_buffer[:6, 0], ids)
