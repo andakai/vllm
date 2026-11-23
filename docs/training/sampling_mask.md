@@ -71,13 +71,13 @@ The engine rejects unsupported combinations at startup or request time:
 
 - Speculative decoding with adaptive verification
 - Diffusion models
-- Custom logits processors (engine-level `--logits-processors`)
 
 ## How it works
 
-1. The sampler applies all logit processors (penalties, logit bias, bad words,
-   temperature, min-p) and then top-k/top-p filtering, which sets excluded
-   logits to `-inf`.
+1. The sampler applies all logit processors (logit bias, penalties, bad words,
+   custom `--logits-processors`, thinking budget, temperature, min-p) and then
+   top-k/top-p filtering, which sets excluded logits to `-inf`. A token a
+   custom processor sets to `-inf` is therefore outside the mask.
 2. After sampling, `torch.isfinite(processed_logits)` identifies the surviving
    token IDs — this is the sampling mask.
 3. The mask is transferred GPU → CPU asynchronously alongside sampled tokens.
