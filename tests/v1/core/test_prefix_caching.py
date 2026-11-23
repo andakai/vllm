@@ -7246,3 +7246,41 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+@pytest.mark.parametrize("evict_first_from", [None, 40])
+def test_free_evicts_output_blocks_first(evict_first_from):
+    """`free(evict_first_from=...)` puts the blocks from the one holding that
+    token on at the front of the free queue, ahead of never-used blocks, while
+    they stay cached."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt = [i for i in range(5) for _ in range(8)]  # 40 tokens
+    req = make_request("0", prompt, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(
+        req, len(prompt), num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None and blocks.get_block_ids() == ([1, 2, 3],)
+    req.num_computed_tokens = len(prompt)
+    req.append_output_token_ids(list(range(100, 124)))
+    blocks = manager.allocate_slots(req, num_new_tokens=24, num_new_computed_tokens=0)
+    assert blocks is not None and blocks.get_block_ids() == ([4],)
+    req.num_computed_tokens = 64
+
+    manager.free(req, evict_first_from=evict_first_from)
+
+    free_ids = [
+        b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    if evict_first_from is None:
+        assert free_ids == [5, 6, 7, 8, 9, 10, 4, 3, 2, 1]
+    else:
+        # Block 3 holds prompt tokens 32-39 and the first output tokens.
+        assert free_ids == [4, 3, 5, 6, 7, 8, 9, 10, 2, 1]
+    assert all(manager.block_pool.blocks[i].block_hash is not None for i in (1, 4))

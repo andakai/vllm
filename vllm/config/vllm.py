@@ -2305,6 +2305,13 @@ class VllmConfig:
                     "Please check whether your reasoning parser has implemented "
                     "the `reasoning_start_str` and `reasoning_end_str`."
                 )
+        if self.cache_config.evict_reasoning_blocks_first and not (
+            self.reasoning_config is not None and self.reasoning_config.enabled
+        ):
+            raise ValueError(
+                "--evict-reasoning-blocks-first requires a --reasoning-parser "
+                "with reasoning start and end tokens."
+            )
 
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.

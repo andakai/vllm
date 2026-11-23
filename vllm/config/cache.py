@@ -283,6 +283,12 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional `xxhash` package."""
+    evict_reasoning_blocks_first: bool = False
+    """When a request whose output contains reasoning (thinking) tokens
+    finishes, free the blocks that hold its output to the front of the free
+    queue, so they are evicted before other cached blocks. Clients usually drop
+    the reasoning from the next turn's prompt, which makes these blocks
+    unreachable. Requires `--reasoning-parser`."""
     prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
     """Token interval between retained sliding-window and Mamba prefix-cache
     checkpoints. `0` retains only semantic checkpoints, including the latest
@@ -439,6 +445,7 @@ class CacheConfig:
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",
+            "evict_reasoning_blocks_first",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",

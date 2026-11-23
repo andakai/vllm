@@ -107,6 +107,22 @@ class Scheduler(SchedulerInterface):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
+        # Token sequences that mark reasoning in a request's output.
+        self._reasoning_markers: list[list[int]] = []
+        if (
+            self.cache_config.evict_reasoning_blocks_first
+            and self.cache_config.enable_prefix_caching
+        ):
+            reasoning_config = vllm_config.reasoning_config
+            assert reasoning_config is not None
+            self._reasoning_markers = [
+                ids
+                for ids in (
+                    reasoning_config.reasoning_start_token_ids,
+                    reasoning_config.natural_reasoning_end_token_ids,
+                )
+                if ids
+            ]
         self.lora_config = vllm_config.lora_config
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
@@ -3240,12 +3256,31 @@ class Scheduler(SchedulerInterface):
             request.last_sched_seq <= self.processed_step_seq
         )
 
+    def _reasoning_output_start(self, request: Request) -> int | None:
+        """The first output token's position for a finished request whose
+        output contains reasoning, when `--evict-reasoning-blocks-first` asks
+        to evict such blocks first; else None."""
+        if not self._reasoning_markers or not request.is_finished():
+            return None
+        output = request.output_token_ids
+        for marker in self._reasoning_markers:
+            n = len(marker)
+            if (
+                (marker[0] in output)
+                if n == 1
+                else any(
+                    output[i : i + n] == marker for i in range(len(output) - n + 1)
+                )
+            ):
+                return request.num_prompt_tokens
+        return None
+
     def _free_request_blocks(self, request: Request):
         """Free the request's KV blocks, deferring the return to the block
         pool when an in-flight GPU step may still write them.
         """
         if self._request_blocks_can_be_freed(request):
-            self.kv_cache_manager.free(request)
+            self.kv_cache_manager.free(request, self._reasoning_output_start(request))
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
         if blocks:

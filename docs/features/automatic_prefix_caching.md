@@ -67,6 +67,10 @@ With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports spe
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
+## Reasoning models
+
+Clients usually drop a reasoning model's thinking from the next turn's prompt, so the blocks that hold a finished request's output are rarely hit again. With `--evict-reasoning-blocks-first` (requires `--reasoning-parser`), a finished request whose output contains the reasoning start or end tokens frees the blocks from its first output token on to the front of the free queue. They stay cached but are evicted before other cached blocks, which keeps conversation prefixes resident under KV-cache pressure. Only full-attention and sliding-window KV cache groups apply it.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
