@@ -838,6 +838,7 @@ class EngineArgs:
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
     )
+    suppress_token_ids: list[int] | None = ModelConfig.suppress_token_ids
     """Custom logitproc types"""
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
@@ -1071,6 +1072,9 @@ class EngineArgs:
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
             "--logits-processors", **model_kwargs["logits_processors"]
+        )
+        model_group.add_argument(
+            "--suppress-token-ids", **model_kwargs["suppress_token_ids"]
         )
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
@@ -2083,6 +2087,7 @@ class EngineArgs:
             checkpoint_prepare_on_startup=self.checkpoint_prepare_on_startup,
             model_impl=self.model_impl,
             logits_processors=self.logits_processors,
+            suppress_token_ids=self.suppress_token_ids,
             video_pruning_rate=self.video_pruning_rate,
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
