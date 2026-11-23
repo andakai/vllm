@@ -28,7 +28,7 @@ from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
@@ -114,7 +114,7 @@ class AuxOutputWorkerConnector:
         """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
-        if not get_tp_group().is_first_rank:
+        if not (get_tp_group().is_first_rank and get_pp_group().is_last_rank):
             return
 
         vllm_config = self._vllm_config
@@ -135,6 +135,11 @@ class AuxOutputWorkerConnector:
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
+
+    @property
+    def routing_rows(self) -> torch.Tensor:
+        """Capture buffer that PP stages pass on: each stage fills its own layers."""
+        return self._capturer.device_buffer
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
