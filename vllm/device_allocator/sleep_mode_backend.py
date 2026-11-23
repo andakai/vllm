@@ -50,14 +50,16 @@ class SleepModeBackend(ABC):
         self._state: SleepModeState = "RUNNING"
 
     @abstractmethod
-    def suspend(self, discardable: Collection[int] = ()) -> None:
+    def suspend(
+        self, discardable: Collection[int] = (), keep_kv_cache: bool = False
+    ) -> None:
         """Free GPU state, so that `resume` restores it at the same addresses.
 
         `discardable` holds the storage addresses of the tensors the caller
         rewrites after `resume`, so they need no backup: the parameters not
         selected for preservation at level 2, nothing at level 1. A backend
-        doesn't need to know the level. KV cache and workspace scratch are never
-        restored.
+        doesn't need to know the level. Workspace scratch is never restored,
+        and the KV cache only with `keep_kv_cache`.
         """
         raise NotImplementedError
 
@@ -123,13 +125,16 @@ class CuMemBackend(SleepModeBackend):
     host, with NCCL buffers left untouched (they are outside the allocator pool).
     """
 
-    def suspend(self, discardable: Collection[int] = ()) -> None:
+    def suspend(
+        self, discardable: Collection[int] = (), keep_kv_cache: bool = False
+    ) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "SUSPENDED"
-        get_mem_allocator_instance().sleep(
-            ("weights", "runtime", "cudagraph"), discardable
-        )
+        offload_tags: tuple[str, ...] = ("weights", "runtime", "cudagraph")
+        if keep_kv_cache:
+            offload_tags += ("kv_cache",)
+        get_mem_allocator_instance().sleep(offload_tags, discardable)
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance

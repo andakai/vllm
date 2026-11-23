@@ -201,7 +201,11 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def sleep(
-        self, level: int = 1, mode: "PauseMode" = "abort", reset_connector: bool = True
+        self,
+        level: int = 1,
+        mode: "PauseMode" = "abort",
+        reset_connector: bool = True,
+        keep_kv_cache: bool = False,
     ) -> None:
         """Sleep the engine."""
         ...

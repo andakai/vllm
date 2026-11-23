@@ -48,7 +48,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     calls: list[tuple[str, object]] = []
 
     class Backend:
-        def suspend(self, discardable=()) -> None:
+        def suspend(self, discardable=(), keep_kv_cache=False) -> None:
             calls.append(("backend.suspend", set(discardable)))
 
         def resume(self, tags: list[str] | None = None) -> None:
@@ -129,7 +129,7 @@ def test_suspend_resume_state_transitions():
 class DummyBackend(SleepModeBackend):
     """A no-GPU backend used to exercise lifecycle + registration in CPU tests."""
 
-    def suspend(self, discardable=()) -> None:
+    def suspend(self, discardable=(), keep_kv_cache=False) -> None:
         self._state = "SUSPENDED"
 
     def resume(self, tags: list[str] | None = None) -> None:
@@ -138,3 +138,21 @@ class DummyBackend(SleepModeBackend):
     @classmethod
     def supports_durable_storage(cls) -> bool:
         return True
+
+
+@pytest.mark.parametrize("keep_kv_cache", [False, True])
+def test_cumem_backend_backs_up_kv_cache_only_when_kept(monkeypatch, keep_kv_cache):
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    calls = []
+
+    class Allocator:
+        def sleep(self, offload_tags, discardable):
+            calls.append((offload_tags, set(discardable)))
+
+    monkeypatch.setattr(
+        "vllm.device_allocator.get_mem_allocator_instance", lambda: Allocator()
+    )
+    CuMemBackend().suspend({1}, keep_kv_cache)
+    tags = ("weights", "runtime", "cudagraph")
+    assert calls == [(tags + ("kv_cache",) * keep_kv_cache, {1})]

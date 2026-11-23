@@ -29,9 +29,12 @@ async def sleep(
     level: Annotated[int, Query(ge=0, le=2)] = 1,
     mode: Annotated[PauseMode, Query()] = "abort",
     reset_connector: Annotated[bool, Query()] = True,
+    keep_kv_cache: Annotated[bool, Query()] = False,
 ) -> JSONResponse:
     with sleep_mode_operation_metrics().record("sleep"):
-        await engine_client(raw_request).sleep(level, mode, reset_connector)
+        await engine_client(raw_request).sleep(
+            level, mode, reset_connector, keep_kv_cache
+        )
     return JSONResponse(content={"status": "sleeping", "level": level})
 
 

@@ -157,7 +157,7 @@ class CPUWorker(Worker):
         else:
             self.model_runner = CPUModelRunner(self.vllm_config, self.device)
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(self, level: int = 1, keep_kv_cache: bool = False) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 

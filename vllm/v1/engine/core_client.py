@@ -219,7 +219,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def sleep(
-        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+        keep_kv_cache: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -329,7 +333,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def sleep_async(
-        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+        keep_kv_cache: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -473,11 +481,15 @@ class InprocClient(EngineCoreClient):
         self.engine_core.reset_encoder_cache()
 
     def sleep(
-        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+        keep_kv_cache: bool = False,
     ) -> None:
         if mode == "wait":
             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
-        result = self.engine_core.sleep(level, mode, reset_connector)
+        result = self.engine_core.sleep(level, mode, reset_connector, keep_kv_cache)
         assert result is None
 
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
@@ -1144,9 +1156,13 @@ class SyncMPClient(MPClient):
         return self.call_utility("pin_lora", lora_id)
 
     def sleep(
-        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+        keep_kv_cache: bool = False,
     ) -> None:
-        self.call_utility("sleep", level, mode, reset_connector)
+        self.call_utility("sleep", level, mode, reset_connector, keep_kv_cache)
 
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         self.call_utility("release_kv_cache_memory", reset_connector)
@@ -1429,9 +1445,15 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("reset_encoder_cache")
 
     async def sleep_async(
-        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+        keep_kv_cache: bool = False,
     ) -> None:
-        await self.call_utility_async("sleep", level, mode, reset_connector)
+        await self.call_utility_async(
+            "sleep", level, mode, reset_connector, keep_kv_cache
+        )
 
     async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
         await self.call_utility_async("release_kv_cache_memory", reset_connector)
