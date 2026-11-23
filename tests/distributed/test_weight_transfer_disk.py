@@ -122,3 +122,13 @@ def test_index_selects_files(tmp_path):
 def test_missing_checkpoint_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         checkpoint_files(str(tmp_path))
+
+
+def test_truncated_checkpoint_is_rejected_before_loading(tmp_path):
+    save_file({"a": torch.ones(64), "b": torch.ones(64)}, tmp_path / "x.safetensors")
+    path = tmp_path / "x.safetensors"
+    path.write_bytes(path.read_bytes()[:-16])
+    target = Target()
+    with pytest.raises(ValueError, match="truncated"):
+        make_worker(target).update_weights({"path": str(tmp_path)})
+    assert target.loaded == {}

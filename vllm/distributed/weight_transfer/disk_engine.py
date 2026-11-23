@@ -10,8 +10,10 @@ which writes the source's tensors and removes them once loaded.
 """
 
 import glob
+import json
 import os
 import shutil
+import struct
 import tempfile
 from dataclasses import dataclass
 from typing import ClassVar, Self
@@ -77,6 +79,28 @@ def checkpoint_files(path: str) -> list[str]:
     return files
 
 
+def check_complete(files: list[str]) -> None:
+    """Raise unless every file holds a readable safetensors header and all the
+    tensor data it declares, so a missing or truncated checkpoint is rejected
+    before any weight is written."""
+    for path in files:
+        with open(path, "rb") as f:
+            head = f.read(8)
+            if len(head) != 8:
+                raise ValueError(f"{path!r} is not a safetensors file.")
+            (header_size,) = struct.unpack("<Q", head)
+            try:
+                header = json.loads(f.read(header_size))
+            except ValueError as e:
+                raise ValueError(f"{path!r} has a corrupt safetensors header.") from e
+        data_end = max(
+            (t["data_offsets"][1] for k, t in header.items() if k != "__metadata__"),
+            default=0,
+        )
+        if os.path.getsize(path) < 8 + header_size + data_end:
+            raise ValueError(f"{path!r} is truncated.")
+
+
 class DiskWeightTransferEngine(
     WeightTransferEngine[DiskWeightTransferInitInfo, DiskWeightTransferUpdateInfo]
 ):
@@ -104,6 +128,7 @@ class DiskWeightTransferEngine(
         )
 
         files = checkpoint_files(update_info.path)
+        check_complete(files)
         self.model.load_weights(
             safetensors_weights_iterator(files, use_tqdm_on_load=False)
         )
