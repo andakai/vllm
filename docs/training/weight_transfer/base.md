@@ -463,6 +463,48 @@ At the LLM/API layer, call `start_draft_weight_update()` instead of
 `update_weights` / `finish_weight_update` are unchanged. Engines that cannot
 support this set `supports_draft_weight_update = False`.
 
+### LoRA Adapter Updates
+
+To update a LoRA adapter instead of the base model, call
+`start_lora_weight_update(lora_request, peft_config)` (HTTP: `POST /start_lora_weight_update` with `{"lora_name": ..., "peft_config": {...}}`) instead of
+`start_weight_update()`, then send the adapter's PEFT tensors
+(`base_model.model....lora_A.weight`, `...lora_B.weight`) with the usual
+`update_weights` chunks and call `finish_weight_update`. The base model is not
+touched; the engine receives the tensors, and `finish_weight_update` loads them
+in place of the adapter, keeping its name and ID.
+
+- The adapter must already be loaded, e.g. with `/v1/load_lora_adapter` or a
+  `LoRARequest`, so requests can name it. `peft_config` is the adapter's PEFT
+  config as a dict (`LoraConfig.to_dict()`), with the same rank and target
+  modules.
+- The update pins the adapter, so it is never evicted and reloaded from its
+  original path with the old weights.
+- Prefix-cache keys use the adapter's name, not its contents: reset the prefix
+  cache before resuming, e.g. with `/pause` (which clears it by default) around
+  the update.
+- Only engines with `supports_draft_weight_update = True` (NCCL, IPC) support it,
+  since the update loads through the target's `load_weights`.
+
+A trainer engine drives `start_weight_update()` itself, so wrap the client to
+start a LoRA update instead:
+
+```python
+class LoRAUpdateClient:
+    def __init__(self, client, lora_request, peft_config):
+        self.client, self.lora_request, self.peft_config = (
+            client, lora_request, peft_config
+        )
+
+    def start_weight_update(self):
+        self.client.start_lora_weight_update(self.lora_request, self.peft_config)
+
+    def __getattr__(self, name):  # init, update_weights, finish_weight_update
+        return getattr(self.client, name)
+```
+
+`HTTPVLLMWeightSyncClient` resolves the adapter by `lora_request.lora_name`;
+`RayVLLMWeightSyncClient` passes the request to `LLM`/`AsyncLLM`.
+
 ### Implementing a Custom Engine
 
 #### 1. Define Info Dataclasses

@@ -17,6 +17,7 @@ from vllm.entrypoints.rl.online import api_router
 from vllm.entrypoints.rl.online import metrics as rl_metrics
 from vllm.entrypoints.rl.online.metrics import WeightOperationMetrics
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
+from vllm.lora.request import LoRARequest
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -31,7 +32,13 @@ def sample(registry, name, operation):
 
 class Request:
     def __init__(self, engine):
-        self.app = SimpleNamespace(state=SimpleNamespace(engine_client=engine))
+        lora = LoRARequest(lora_name="policy", lora_int_id=1, lora_path="/adapter")
+        self.app = SimpleNamespace(
+            state=SimpleNamespace(
+                engine_client=engine,
+                openai_serving_models=SimpleNamespace(lora_requests={"policy": lora}),
+            )
+        )
 
 
 class Engine:
@@ -78,6 +85,11 @@ def test_record_releases_in_flight_and_observes_duration(registry, fail):
         ("shutdown", api_router.shutdown_weight_transfer_engine, None),
         ("start", api_router.start_weight_update, None),
         ("start_draft", api_router.start_draft_weight_update, None),
+        (
+            "start_lora",
+            api_router.start_lora_weight_update,
+            {"lora_name": "policy", "peft_config": {}},
+        ),
         ("update", api_router.update_weights, {"update_info": {}}),
         ("finish", api_router.finish_weight_update, None),
     ],

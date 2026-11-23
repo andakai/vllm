@@ -949,6 +949,36 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// A LoRA weight update names a loaded adapter; any other name is a 404 and
+/// never reaches the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_lora_weight_update_requires_a_loaded_adapter() {
+    let (mut app, engine_task) = test_app_with_dev_mode(true).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_lora_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"lora_name": "policy", "peft_config": {"r": 8}}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(
+        json["error"]["message"],
+        "LoRA adapter 'policy' is not loaded"
+    );
+    engine_task.abort_and_join().await;
+}
+
 /// `VLLM_SERVER_DEV_MODE` reaches the router through `ApiServerOptions`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -11738,6 +11768,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/shutdown_weight_transfer_engine"),
         ("POST", "/start_weight_update"),
         ("POST", "/start_draft_weight_update"),
+        ("POST", "/start_lora_weight_update"),
         ("POST", "/update_weights"),
         ("POST", "/finish_weight_update"),
         ("POST", "/update_weight_version"),

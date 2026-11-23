@@ -337,6 +337,12 @@ class EngineClient(ABC):
         """Start a new weight update targeting the speculative draft model."""
         raise NotImplementedError
 
+    async def start_lora_weight_update(
+        self, lora_request: LoRARequest, peft_config: dict[str, Any]
+    ) -> None:
+        """Start a weight update that replaces a loaded LoRA adapter's weights."""
+        raise NotImplementedError
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
         raise NotImplementedError

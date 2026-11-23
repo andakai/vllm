@@ -22,6 +22,8 @@ from vllm.distributed.weight_transfer.base import (
 if TYPE_CHECKING:
     from ray.actor import ActorHandle
 
+    from vllm.lora.request import LoRARequest
+
 
 def _json_safe_update_info(update_info: dict[str, Any]) -> dict[str, Any]:
     """Make an update_info dict JSON-serializable for HTTP transport.
@@ -84,6 +86,16 @@ class HTTPVLLMWeightSyncClient:
     def start_weight_update(self) -> None:
         self._post("start_weight_update")
 
+    def start_lora_weight_update(
+        self, lora_request: "LoRARequest", peft_config: dict[str, Any]
+    ) -> None:
+        """Start replacing a LoRA adapter's weights; the server resolves the
+        adapter by `lora_request.lora_name`."""
+        self._post(
+            "start_lora_weight_update",
+            {"lora_name": lora_request.lora_name, "peft_config": peft_config},
+        )
+
     def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
         self._post(
             "update_weights", {"update_info": _json_safe_update_payload(update_info)}
@@ -121,6 +133,18 @@ class RayVLLMWeightSyncClient:
         import ray
 
         ray.get([h.start_weight_update.remote() for h in self.handles])
+
+    def start_lora_weight_update(
+        self, lora_request: "LoRARequest", peft_config: dict[str, Any]
+    ) -> None:
+        import ray
+
+        ray.get(
+            [
+                h.start_lora_weight_update.remote(lora_request, peft_config)
+                for h in self.handles
+            ]
+        )
 
     def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
         import ray

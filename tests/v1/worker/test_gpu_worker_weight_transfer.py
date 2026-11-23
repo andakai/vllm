@@ -85,6 +85,8 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker._weight_update_active = False
     worker._incomplete_weight_updates = set()
     worker._weight_update_is_draft = False
+    worker._lora_weight_update = None
+    worker._lora_weight_receiver = gpu_worker._LoRAWeightReceiver()
     worker._kv_cache_reclaimable = False
     worker._weight_update_kv_cache_loan = ExitStack()
     worker.model_runner = _RecordingModelRunner()
@@ -325,3 +327,63 @@ def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):
         Worker.start_weight_update(worker)
+
+
+class _LoRARecordingEngine(_RecordingEngine):
+    """Loads each update chunk into the current target, like the NCCL engine."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.supports_draft_weight_update = True
+        self.target: nn.Module | None = None
+
+    def set_weight_update_target(self, model: nn.Module, model_config) -> None:
+        self.target = model
+
+    def update_weights(self, update_info: dict) -> None:
+        assert self.target is not None
+        self.target.load_weights(update_info["weights"])
+
+
+def _make_lora_worker(monkeypatch, loaded: set[int]):
+    engine = _LoRARecordingEngine()
+    worker = _make_worker(engine)
+    calls: list = []
+    monkeypatch.setattr(worker, "list_loras", lambda: loaded)
+    monkeypatch.setattr(worker, "add_lora", lambda request: calls.append(request))
+    monkeypatch.setattr(worker, "pin_lora", lambda lora_id: calls.append(lora_id))
+    return worker, engine, calls
+
+
+def test_lora_session_replaces_the_adapter_with_received_tensors(monkeypatch):
+    worker, engine, calls = _make_lora_worker(monkeypatch, loaded={7})
+    weight = torch.ones(2, 3)
+    name = "base_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+
+    Worker.start_lora_weight_update(worker, "policy", 7, "/adapter", {"r": 2})
+    Worker.update_weights(worker, {"weights": [(name, weight)]})
+    weight.zero_()  # the engine reuses its buffer for the next chunk
+    Worker.finish_weight_update(worker)
+
+    request, pinned_id = calls
+    assert isinstance(request, gpu_worker._TensorLoRARequest)
+    assert (request.lora_name, request.lora_int_id) == ("policy", 7)
+    assert request.lora_path == "/adapter"
+    assert request.load_inplace and request._peft_config == {"r": 2}
+    assert request._lora_tensors is not None
+    assert torch.equal(request._lora_tensors[name], torch.ones(2, 3))
+    assert pinned_id == 7
+    # The base model is not reloaded.
+    assert not engine.started and not engine.finished
+    assert worker.model_runner.target_hook_calls == 0
+    assert worker._weight_update_active is False
+    assert not Worker.has_incomplete_weight_update(worker)
+
+
+def test_lora_session_requires_a_loaded_adapter(monkeypatch):
+    worker, _, calls = _make_lora_worker(monkeypatch, loaded=set())
+
+    with pytest.raises(RuntimeError, match="is not loaded"):
+        Worker.start_lora_weight_update(worker, "policy", 7, "/adapter", {"r": 2})
+
+    assert worker._weight_update_active is False and not calls

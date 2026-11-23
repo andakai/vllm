@@ -192,6 +192,27 @@ async def start_draft_weight_update(raw_request: Request):
     return JSONResponse(content={"message": "Draft weight update started"})
 
 
+@router.post("/start_lora_weight_update")
+async def start_lora_weight_update(
+    raw_request: Request,
+    lora_name: Annotated[str, Body(embed=True)],
+    peft_config: Annotated[dict[str, Any], Body(embed=True)],
+):
+    """Start replacing the weights of a LoRA adapter loaded under `lora_name`."""
+    serving_models = raw_request.app.state.openai_serving_models
+    lora_request = serving_models.lora_requests.get(lora_name)
+    if lora_request is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND.value,
+            detail=f"LoRA adapter {lora_name!r} is not loaded",
+        )
+    with weight_operation_metrics().record("start_lora"):
+        await engine_client(raw_request).start_lora_weight_update(
+            lora_request, peft_config
+        )
+    return JSONResponse(content={"message": "LoRA weight update started"})
+
+
 @router.post("/update_weights")
 async def update_weights(
     raw_request: Request,

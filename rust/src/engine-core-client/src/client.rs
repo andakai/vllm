@@ -960,6 +960,30 @@ impl EngineCoreClient {
         Ok(())
     }
 
+    /// Start a weight update that replaces a loaded LoRA adapter's weights.
+    pub async fn start_lora_weight_update(
+        &self,
+        lora_name: &str,
+        lora_int_id: u64,
+        lora_path: &str,
+        peft_config: JsonValue,
+    ) -> Result<()> {
+        self.collective_rpc_with(
+            self.inner.readiness().withdraw_until_recheck(),
+            "start_lora_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([
+                ("lora_name".to_string(), JsonValue::from(lora_name)),
+                ("lora_int_id".to_string(), JsonValue::from(lora_int_id)),
+                ("lora_path".to_string(), JsonValue::from(lora_path)),
+                ("peft_config".to_string(), peft_config),
+            ]),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Apply one backend-specific weight metadata chunk.
     pub async fn update_weights(&self, update_info: JsonValue) -> Result<()> {
         self.collective_rpc(

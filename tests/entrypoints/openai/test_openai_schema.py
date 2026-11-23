@@ -218,6 +218,7 @@ def test_openapi_stateless(case: schemathesis.Case):
         "/init_weight_transfer_engine",
         "/start_weight_update",
         "/start_draft_weight_update",
+        "/start_lora_weight_update",
         "/update_weights",
         "/finish_weight_update",
         "/update_weight_version",
