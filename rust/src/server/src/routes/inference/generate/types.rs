@@ -83,6 +83,7 @@ pub struct GenerateRequest {
     pub features: Option<MultiModalFeatures>,
     pub return_token_ids: Option<bool>,
     pub output_mode: Option<GenerateOutputMode>,
+    pub prompt_logprobs_format: Option<PromptLogprobsFormat>,
     /// Whether reasoning has ended before the first generated token, as
     /// resolved by `/render`. `true` applies structured outputs from the first
     /// token; `None` lets the engine check the prompt with its reasoning parser.
@@ -176,6 +177,31 @@ pub(super) struct GenerateStreamResponse {
     pub metrics: Option<PerRequestMetrics<StreamingSpeculativeDecodingMetrics>>,
 }
 
+/// How a generate response returns prompt logprobs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptLogprobsFormat {
+    /// One object per position in `prompt_logprobs`.
+    #[default]
+    Dict,
+    /// Engine rows as `.npy` arrays in `prompt_logprobs_flat`.
+    Flat,
+}
+
+/// Mirrors the Python vLLM `PromptLogprobsFlat` class: row `i` scores prompt
+/// position `start + i`, column 0 is the prompt token and columns `1..k` the
+/// top k; each array is a base64 `.npy` file.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct PromptLogprobsFlat {
+    pub start: usize,
+    /// int32 `[rows, k + 1]`.
+    pub token_ids: String,
+    /// float32 `[rows, k + 1]`.
+    pub logprobs: String,
+    /// int64 `[rows]`: the rank of each prompt token.
+    pub ranks: String,
+}
+
 /// Mirrors the Python vLLM `GenerateResponse` class.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponse {
@@ -188,6 +214,7 @@ pub(super) struct GenerateResponse {
     pub output_mode: GenerateOutputMode,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    pub prompt_logprobs_flat: Option<PromptLogprobsFlat>,
     /// Base64 `.npy` float32 array, as Python `numpy2base64` encodes it.
     pub prompt_token_id_logprobs: Option<String>,
     pub prompt_token_ids: Option<Vec<u32>>,

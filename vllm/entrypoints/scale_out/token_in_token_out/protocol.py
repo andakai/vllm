@@ -331,6 +331,15 @@ class GenerateRequest(BaseModel):
         ),
     )
 
+    prompt_logprobs_format: Literal["dict", "flat"] = Field(
+        default="dict",
+        description=(
+            "With `sampling_params.prompt_logprobs`, 'flat' returns them as "
+            "`prompt_logprobs_flat`, NumPy arrays in base64, instead of one "
+            "object per position in `prompt_logprobs`."
+        ),
+    )
+
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     cache_salt: str | None = Field(
@@ -643,6 +652,23 @@ class GenerateDerenderChoice(GenerateChoiceBase):
     is hidden by `include_reasoning=false`."""
 
 
+class PromptLogprobsFlat(BaseModel):
+    """Prompt logprobs as the engine's rows, each array an `.npy` file in
+    base64. Row `i` scores prompt position `start + i`: column 0 is the prompt
+    token there and columns `1..k` are the top-k tokens, which may repeat it.
+    Values are not clamped."""
+
+    start: int
+    """The first scored prompt position."""
+    token_ids: str
+    """int32 `[rows, k + 1]`."""
+    logprobs: str
+    """float32 `[rows, k + 1]`."""
+    ranks: str
+    """int64 `[rows]`: the rank of each prompt token; column `j > 0` has rank
+    `j`."""
+
+
 class GenerateResponseBase(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -656,6 +682,7 @@ class GenerateResponseBase(BaseModel):
     created: int | None = None
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_logprobs_flat: PromptLogprobsFlat | None = None
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None

@@ -15,7 +15,11 @@ from typing import Any
 import numpy as np
 import orjson
 
-from vllm.logprobs import FlatLogprobs
+from vllm.entrypoints.generate.base.serving import clamp_prompt_logprobs
+from vllm.logprobs import FlatLogprobs, PromptLogprobs
+from vllm.utils.serial_utils import numpy2base64
+
+from .protocol import PromptLogprobsFlat
 
 # Logprob entries rendered between yields to the event loop (about 2 ms).
 RENDER_BLOCK_ENTRIES = 1 << 13
@@ -202,3 +206,25 @@ def render_json_with_fragments(
         out += fragments[index]
         out.append(piece)
     return out
+
+
+def prompt_logprobs_fields(
+    prompt_logprobs: PromptLogprobs | None, prompt_logprobs_format: str
+) -> dict[str, Any]:
+    """`prompt_logprobs` or `prompt_logprobs_flat` of a generate response."""
+    if prompt_logprobs_format != "flat" or prompt_logprobs is None:
+        return {"prompt_logprobs": clamp_prompt_logprobs(prompt_logprobs)}
+    if (
+        not isinstance(prompt_logprobs, FlatLogprobs)
+        or (rows := prompt_logprobs.scored_rows()) is None
+    ):
+        raise ValueError("Prompt logprobs have no flat engine rows.")
+    start, token_ids, logprobs, ranks = rows
+    return {
+        "prompt_logprobs_flat": PromptLogprobsFlat(
+            start=start,
+            token_ids=numpy2base64(token_ids),
+            logprobs=numpy2base64(logprobs),
+            ranks=numpy2base64(ranks),
+        )
+    }

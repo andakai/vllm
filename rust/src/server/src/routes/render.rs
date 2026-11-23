@@ -130,6 +130,7 @@ fn lower_render_request(
         features,
         return_token_ids,
         output_mode: None,
+        prompt_logprobs_format: None,
         // Carry what the chat route would pass to the engine, so the engine
         // gates structured outputs the same way on `/inference/v1/generate`.
         reasoning_ended: text_request.reasoning_ended,

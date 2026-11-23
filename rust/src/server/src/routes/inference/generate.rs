@@ -20,7 +20,9 @@ use thiserror_ext::AsReport as _;
 use tracing::{error, info};
 use tracing_futures::Instrument as _;
 use vllm_chat::multimodal::MultimodalInput;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::FinishReason;
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, Finished,
@@ -33,7 +35,7 @@ use self::types::{
     GenerateChoiceLogProbs, GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent,
     GenerateLogprob, GenerateOutputMode, GenerateResponse, GenerateResponseChoice,
     GenerateResponseStreamChoice, GenerateStreamResponse, MmResponseInfo, PerRequestMetrics,
-    PlaceholderRangeInfo,
+    PlaceholderRangeInfo, PromptLogprobsFlat,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
@@ -240,6 +242,7 @@ async fn generate_chunk_stream(
         include_logprobs,
         // Ignored: raw generate streaming has no prompt-logprobs wire shape.
         include_prompt_logprobs: _,
+        flat_prompt_logprobs: _,
         return_token_ids,
         output_mode,
     }: ResponseOptions,
@@ -414,6 +417,7 @@ fn collect_generate(
         include_continuous_usage: _,
         include_logprobs,
         include_prompt_logprobs,
+        flat_prompt_logprobs,
         return_token_ids,
         output_mode,
     }: ResponseOptions,
@@ -438,7 +442,19 @@ fn collect_generate(
     } else {
         None
     };
-    let prompt_logprobs = if include_prompt_logprobs {
+    let prompt_logprobs_flat = if flat_prompt_logprobs {
+        let scored = collected
+            .prompt_logprobs
+            .as_ref()
+            .map_or(&[][..], |logprobs| &logprobs.scored_positions[..]);
+        Some(flat_prompt_logprobs_of(
+            scored,
+            collected.prompt_token_ids.len(),
+        )?)
+    } else {
+        None
+    };
+    let prompt_logprobs = if include_prompt_logprobs && !flat_prompt_logprobs {
         match collected.prompt_logprobs.as_ref() {
             Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(
                 &prompt_logprobs.scored_positions,
@@ -496,6 +512,7 @@ fn collect_generate(
             weight_versions: collected.weight_versions,
         }],
         prompt_logprobs,
+        prompt_logprobs_flat,
         prompt_token_id_logprobs: collected
             .prompt_token_id_logprobs
             .as_ref()
@@ -594,6 +611,39 @@ fn raw_logprobs_to_generate(logprobs: &DecodedLogprobs) -> Result<GenerateLogPro
 
     Ok(GenerateLogProbs {
         content: Some(content),
+    })
+}
+
+/// The engine rows of the scored prompt positions, which end the prompt, as
+/// Python's `prompt_logprobs_fields` returns them.
+fn flat_prompt_logprobs_of(
+    scored_positions: &[DecodedPositionLogprobs],
+    prompt_len: usize,
+) -> Result<PromptLogprobsFlat, ApiError> {
+    let width = scored_positions.first().map_or(0, |position| position.entries.len());
+    if scored_positions.iter().any(|position| position.entries.len() != width) {
+        return Err(ApiError::server_error(
+            "prompt logprob rows have different widths".to_string(),
+        ));
+    }
+    let rows = scored_positions.len();
+    let entries = || scored_positions.iter().flat_map(|position| &position.entries);
+    let token_ids = entries().map(|entry| entry.token_id as i32).collect();
+    let logprobs = entries().map(|entry| entry.logprob).collect();
+    let ranks: Vec<u8> = scored_positions
+        .iter()
+        .flat_map(|position| i64::from(position.entries[0].rank).to_le_bytes())
+        .collect();
+    let array_error = |error: String| ApiError::server_error(error);
+    Ok(PromptLogprobsFlat {
+        start: prompt_len - rows,
+        token_ids: npy_base64(
+            &WireNdArray::from_i32(vec![rows, width], token_ids).map_err(array_error)?,
+        )?,
+        logprobs: npy_base64(
+            &WireNdArray::from_f32(vec![rows, width], logprobs).map_err(array_error)?,
+        )?,
+        ranks: npy_base64(&WireNdArray::from_raw(TensorDtype::I64, vec![rows], ranks))?,
     })
 }
 
@@ -1441,6 +1491,25 @@ mod tests {
         for (map, id) in maps[2..].iter().zip([33, 44, 55]) {
             assert!(map.as_ref().unwrap().contains_key(&id));
         }
+    }
+
+    #[test]
+    fn flat_prompt_logprobs_are_the_engine_rows_of_the_scored_positions() {
+        // A 5-token prompt with prompt_logprob_start=1 scores tokens 2..=4.
+        let scored_positions = [33, 44, 55].map(|id| position(&[(id, -1.0, 4), (7, -0.5, 1)]));
+        let flat = flat_prompt_logprobs_of(&scored_positions, 5).expect("flat");
+        assert_eq!(flat.start, 2);
+        let ids = WireNdArray::from_i32(vec![3, 2], vec![33, 7, 44, 7, 55, 7]).unwrap();
+        assert_eq!(flat.token_ids, npy_base64(&ids).unwrap());
+        let ranks = [4i64; 3].iter().flat_map(|rank| rank.to_le_bytes()).collect();
+        let ranks = WireNdArray::from_raw(TensorDtype::I64, vec![3], ranks);
+        assert_eq!(flat.ranks, npy_base64(&ranks).unwrap());
+
+        let ragged = [
+            position(&[(1, -1.0, 1)]),
+            position(&[(2, -1.0, 1), (3, -2.0, 2)]),
+        ];
+        assert!(flat_prompt_logprobs_of(&ragged, 3).is_err());
     }
 
     #[tokio::test]

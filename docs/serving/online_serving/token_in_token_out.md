@@ -28,6 +28,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `output_mode` | `"tokens"` (default) or `"text"`, see [Output modes](#output-modes). |
 | `stream`, `stream_options` | SSE chunks ending with `data: [DONE]`. |
 | `return_token_ids` | Echo the final prompt IDs as `prompt_token_ids`. |
+| `prompt_logprobs_format` | `"dict"` (default) or `"flat"`: with `sampling_params.prompt_logprobs`, `"flat"` returns `prompt_logprobs_flat` instead of `prompt_logprobs`, see [Flat prompt logprobs](#flat-prompt-logprobs). Not with `stream`. |
 | `features` / `content_parts` | Multimodal input, mutually exclusive. |
 | `request_id`, `model`, `cache_salt`, `priority`, `kv_transfer_params`, `ec_transfer_params` | Optional. |
 
@@ -41,7 +42,20 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `logprobs` | `{"content": [{"token_id", "logprob", "rank", "top_logprobs": [...]}]}`, one entry per token, sampled token first. `token_id` is an integer, not the older `"token_id:<id>"` string. Needs `sampling_params.logprobs`. |
 | `weight_versions`, `routed_experts`, `sampling_mask` | Optional, see [Weight versions](#weight-versions); the last two need `--enable-return-routed-experts` / `--return-sampling-mask`. |
 
-The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprobs`. Stream chunks carry the same per-choice fields for the new tokens.
+The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprobs` (or `prompt_logprobs_flat`). Stream chunks carry the same per-choice fields for the new tokens.
+
+### Flat prompt logprobs
+
+`prompt_logprobs` has one object per prompt position, which for a long prompt with top-k candidates (e.g. a teacher scoring a rollout for on-policy distillation) means a large JSON body and many Python objects on both sides. With `"prompt_logprobs_format": "flat"`, the server returns the engine's rows as NumPy arrays instead, each an `.npy` file in base64 (`np.load(io.BytesIO(base64.b64decode(value)))`):
+
+| `prompt_logprobs_flat` field | Notes |
+| --- | --- |
+| `start` | The first scored prompt position (1, or `prompt_logprob_start + 1`). Row `i` scores position `start + i`. |
+| `token_ids` | int32 `[rows, k + 1]`: column 0 is the prompt token at that position, columns `1..k` the top-k tokens, which may repeat it. |
+| `logprobs` | float32 `[rows, k + 1]`, not clamped: `-inf` stays `-inf`. |
+| `ranks` | int64 `[rows]`: the rank of each prompt token. Column `j > 0` has rank `j`. |
+
+Token strings are not returned; at `output_mode="tokens"` the prompt logprobs are not detokenized at all.
 
 ## Targeting a data-parallel rank (`X-data-parallel-rank`)
 
