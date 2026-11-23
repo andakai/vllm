@@ -364,6 +364,10 @@ class SamplingParams(
     prompt_logprob_token_ids; defaults to the first row. Earlier prompt
     positions get None prompt logprobs. Set skip_reading_prefix_cache=False to
     reuse local cached rows before it."""
+    prompt_logprobs_temperature: float | None = None
+    """Temperature for prompt_logprobs and prompt_logprob_token_ids: prompt
+    rows are scored from logits / prompt_logprobs_temperature. Defaults to 1.
+    Sampling keeps its own `temperature`."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -479,6 +483,7 @@ class SamplingParams(
         prompt_logprobs: int | None = None,
         prompt_logprob_token_ids: np.ndarray | list[list[int]] | None = None,
         prompt_logprob_start: int | None = None,
+        prompt_logprobs_temperature: float | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -547,6 +552,7 @@ class SamplingParams(
             prompt_logprobs=prompt_logprobs,
             prompt_logprob_token_ids=prompt_logprob_token_ids,
             prompt_logprob_start=prompt_logprob_start,
+            prompt_logprobs_temperature=prompt_logprobs_temperature,
             logprob_token_ids=logprob_token_ids,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
@@ -1053,6 +1059,22 @@ class SamplingParams(
                     "prompt_logprob_start must be non-negative.",
                     parameter="prompt_logprob_start",
                     value=self.prompt_logprob_start,
+                )
+
+        temperature = self.prompt_logprobs_temperature
+        if temperature is not None:
+            if ids is None and self.prompt_logprobs is None:
+                raise VLLMValidationError(
+                    "prompt_logprobs_temperature requires prompt_logprobs or "
+                    "prompt_logprob_token_ids.",
+                    parameter="prompt_logprobs_temperature",
+                    value=temperature,
+                )
+            if not (math.isfinite(temperature) and temperature > 0):
+                raise VLLMValidationError(
+                    "prompt_logprobs_temperature must be positive and finite.",
+                    parameter="prompt_logprobs_temperature",
+                    value=temperature,
                 )
 
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:

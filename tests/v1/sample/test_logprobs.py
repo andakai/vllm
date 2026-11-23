@@ -506,6 +506,25 @@ def test_prompt_logprob_token_ids_validation():
         verify(prompt_logprobs=1, prompt_logprob_start=-1)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"prompt_logprobs_temperature": 0.7}, "requires prompt_logprobs"),
+        ({"prompt_logprobs": 1, "prompt_logprobs_temperature": 0.0}, "positive"),
+        ({"prompt_logprobs": 1, "prompt_logprobs_temperature": math.inf}, "finite"),
+    ],
+)
+def test_prompt_logprobs_temperature_validation(kwargs, match):
+    params = SamplingParams(**kwargs)
+    with pytest.raises(VLLMValidationError, match=match):
+        params.verify(
+            _model_config(vocab_size=100, max_logprobs=4),
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
+
+
 def test_prompt_logprob_token_ids_reject_fast_prefill():
     """kv-sharing fast prefill would score rows the cross-decoder never ran."""
     processor = SimpleNamespace(
@@ -1740,3 +1759,59 @@ def test_trace_replay_with_spec_decode():
                 rel_tol=5e-2,
                 abs_tol=2.5e-1,
             )
+
+
+def test_prompt_logprobs_temperature():
+    """Prompt rows scored at temperature T match log_softmax(lp_1 / T), where
+    lp_1 are the full-vocabulary scores at T=1, for top-k and token-ID scoring
+    and for requests with different temperatures in one batch."""
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=256,
+        max_logprobs=-1,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        tokenizer = vllm_model.llm.get_tokenizer()
+        prompt = TokensPrompt(
+            prompt_token_ids=tokenizer("The capital of France is Paris, and").input_ids
+        )
+        num_rows = len(prompt["prompt_token_ids"]) - 1
+        ids = [[7, 100 + j, 2000 + j] for j in range(num_rows)]
+
+        def params(temperature, **kwargs):
+            return SamplingParams(
+                max_tokens=1, prompt_logprobs_temperature=temperature, **kwargs
+            )
+
+        outputs = vllm_model.llm.generate(
+            [prompt] * 4,
+            [
+                params(None, prompt_logprobs=-1),
+                params(0.6, prompt_logprobs=5),
+                params(1.3, prompt_logprob_token_ids=ids),
+                params(1.0, prompt_logprobs=5),
+            ],
+        )
+
+    vocab = len(outputs[0].prompt_logprobs[1])
+    lp1 = torch.tensor(
+        [
+            [row[t].logprob for t in range(vocab)]
+            for row in outputs[0].prompt_logprobs[1:]
+        ],
+        dtype=torch.float64,
+    )
+
+    def at(temperature):
+        return torch.log_softmax(lp1 / temperature, dim=-1)
+
+    for output, temperature in ((outputs[1], 0.6), (outputs[3], 1.0)):
+        expected = at(temperature)
+        for r, row in enumerate(output.prompt_logprobs[1:]):
+            for token_id, logprob in row.items():
+                assert logprob.logprob == pytest.approx(
+                    expected[r, token_id].item(), abs=2e-3
+                )
+    scores = torch.as_tensor(outputs[2].prompt_token_id_logprobs, dtype=torch.float64)
+    expected = at(1.3).gather(1, torch.tensor(ids))
+    torch.testing.assert_close(scores, expected, atol=2e-3, rtol=0)

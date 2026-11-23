@@ -49,6 +49,24 @@ student's top-K IDs, which is sent to the engine without conversion; nested
 lists of Python ints are much slower to copy and serialize. With a logits
 `--logprobs-mode`, the matrix holds logits instead of log probabilities.
 
+### Scoring at the rollout temperature
+
+Set `prompt_logprobs_temperature` to score prompt rows from `logits / T`, for
+example when a distillation loss compares the teacher with a student sampled at
+temperature `T`. It applies to `prompt_logprob_token_ids` and to top-K
+`prompt_logprobs`; sampling keeps its own `temperature`. A single log
+probability at temperature 1 cannot be converted to another temperature, which
+would need the whole distribution.
+
+```python
+SamplingParams(
+    max_tokens=1,
+    prompt_logprob_token_ids=student_topk_ids,
+    prompt_logprob_start=len(prompt_ids) - 1,
+    prompt_logprobs_temperature=0.6,
+)
+```
+
 ## Requirements
 
 - The longest row at most `--max-logprobs` candidates.

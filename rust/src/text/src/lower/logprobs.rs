@@ -58,6 +58,12 @@ pub enum LogprobsError {
          one prompt row is scored."
     )]
     PromptLogprobStartOutOfRange { max: u32 },
+    #[error(
+        "prompt_logprobs_temperature requires prompt_logprobs or prompt_logprob_token_ids."
+    )]
+    PromptLogprobsTemperatureWithoutPromptLogprobs,
+    #[error("prompt_logprobs_temperature must be positive and finite.")]
+    InvalidPromptLogprobsTemperature,
 }
 
 /// Validate logprobs count sampling parameters.
@@ -67,6 +73,7 @@ pub(super) fn validate_logprobs(
     logprob_token_ids: Option<&[u32]>,
     prompt_logprob_token_ids: Option<&[Vec<i32>]>,
     prompt_logprob_start: Option<u32>,
+    prompt_logprobs_temperature: Option<f32>,
     sampling_limits: SamplingLimits,
 ) -> Result<(), LogprobsError> {
     let vocab_size = sampling_limits.model_vocab_size;
@@ -86,6 +93,14 @@ pub(super) fn validate_logprobs(
         && prompt_logprob_token_ids.is_none()
     {
         return Err(LogprobsError::PromptLogprobStartWithoutPromptLogprobs);
+    }
+    if let Some(temperature) = prompt_logprobs_temperature {
+        if prompt_logprobs.is_none() && prompt_logprob_token_ids.is_none() {
+            return Err(LogprobsError::PromptLogprobsTemperatureWithoutPromptLogprobs);
+        }
+        if !(temperature.is_finite() && temperature > 0.0) {
+            return Err(LogprobsError::InvalidPromptLogprobsTemperature);
+        }
     }
     validate_prompt_logprob_token_ids(prompt_logprob_token_ids)?;
     validate_logprob_token_ids(logprobs, logprob_token_ids)
