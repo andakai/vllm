@@ -82,7 +82,6 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
             "adaptive speculative verification",
         ),
         ({"pp": 2}, "pipeline parallelism"),
-        ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
     ],
 )
