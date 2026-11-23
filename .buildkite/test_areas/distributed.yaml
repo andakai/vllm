@@ -157,10 +157,12 @@ steps:
   - tests/compile/test_wrapper.py
   - tests/compile/test_aot_compile.py
   - tests/entrypoints/llm/test_collective_rpc.py
+  - tests/entrypoints/rl/return_routed_experts/test_pipeline_parallel.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/rl/return_routed_experts/test_pipeline_parallel.py
   - pytest -v -s ./compile/test_wrapper.py
   - pytest -v -s ./compile/test_aot_compile.py::test_load_on_another_device
   mirror:

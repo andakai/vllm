@@ -16,6 +16,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 PP_POSITIONS_KEY = "pp_positions"
+PP_ROUTED_EXPERTS_KEY = "pp_routed_experts"
 
 
 @dataclass(slots=True)
@@ -105,6 +106,10 @@ class PPHandler:
         # Whether positions depend on encoder outputs, which only the first
         # stage has, so later stages use the first stage's positions.
         self.relay_positions = False
+        # Routed-experts capture buffer `[tokens, layers, top-k]`. Each stage
+        # fills the columns of its own layers and passes the rows on, so the
+        # last stage holds every layer.
+        self.routing_rows: torch.Tensor | None = None
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
@@ -162,6 +167,16 @@ class PPHandler:
             (max_num_tokens, num_dims), dtype=torch.int64, device=self.device
         )
 
+    def add_routing_rows_buffer(
+        self,
+        intermediate_tensors: IntermediateTensors,
+        max_num_tokens: int,
+        shape_per_token: tuple[int, ...],
+    ) -> None:
+        intermediate_tensors[PP_ROUTED_EXPERTS_KEY] = torch.zeros(
+            (max_num_tokens, *shape_per_token), dtype=torch.int32, device=self.device
+        )
+
     def send_positions(
         self, output_intermediate_tensors: IntermediateTensors, positions: torch.Tensor
     ) -> IntermediateTensors:
@@ -172,6 +187,18 @@ class PPHandler:
         token_major = positions.movedim(-1, 0).contiguous()
         return IntermediateTensors(
             output_intermediate_tensors.tensors | {PP_POSITIONS_KEY: token_major}
+        )
+
+    def send_routing_rows(
+        self, output_intermediate_tensors: IntermediateTensors, num_tokens: int
+    ) -> IntermediateTensors:
+        """Add the routed-expert rows of this and earlier stages."""
+        if self.routing_rows is None:
+            return output_intermediate_tensors
+        # A copy, since the next forward overwrites the capture buffer.
+        rows = self.routing_rows[:num_tokens].clone()
+        return IntermediateTensors(
+            output_intermediate_tensors.tensors | {PP_ROUTED_EXPERTS_KEY: rows}
         )
 
     def receive_positions(
@@ -185,6 +212,17 @@ class PPHandler:
             return
         received = intermediate_tensors[PP_POSITIONS_KEY][:num_tokens]
         positions[..., :num_tokens].copy_(received.movedim(0, -1))
+
+    def receive_routing_rows(
+        self, intermediate_tensors: IntermediateTensors, num_tokens: int
+    ) -> None:
+        """Take the earlier stages' routed-expert rows into the capture buffer;
+        this stage's forward then fills the columns of its own layers."""
+        if self.routing_rows is None:
+            return
+        self.routing_rows[:num_tokens].copy_(
+            intermediate_tensors[PP_ROUTED_EXPERTS_KEY][:num_tokens]
+        )
 
     def add_upstream_aux_hidden_states(
         self,

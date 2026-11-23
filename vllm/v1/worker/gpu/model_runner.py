@@ -54,6 +54,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    get_routed_experts_shape_per_token,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -597,6 +600,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.max_num_tokens,
                 self.model_config.mrope_num_dims,
             )
+            if self.vllm_config.aux_output_config.enabled:
+                self.pp_handler.add_routing_rows_buffer(
+                    self.intermediate_tensors,
+                    self.max_num_tokens,
+                    get_routed_experts_shape_per_token(self.vllm_config),
+                )
 
         get_offloader().post_init()
 
@@ -892,6 +901,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.model, self.vllm_config
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
+                if self.pp_handler is not None:
+                    self.pp_handler.routing_rows = (
+                        self.aux_output_connector.routing_rows
+                    )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -2144,6 +2157,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pp_handler.receive_positions(
                     intermediate_tensors, model_inputs["positions"], num_tokens
                 )
+                self.pp_handler.receive_routing_rows(intermediate_tensors, num_tokens)
             n = input_batch.num_tokens_after_padding
             model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
             del intermediate_tensors
@@ -2259,6 +2273,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.pp_handler is not None
             output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
+            )
+            output_intermediate_tensors = self.pp_handler.send_routing_rows(
+                output_intermediate_tensors, input_batch.num_tokens
             )
             return self.pp_handler.send_positions(
                 output_intermediate_tensors, model_inputs["positions"]

@@ -61,6 +61,11 @@ def _routed_experts_dtype_name(num_experts: int) -> str:
     return "uint8" if num_experts <= 256 else "uint16"
 
 
+def get_routed_experts_shape_per_token(vllm_config: VllmConfig) -> tuple[int, int]:
+    num_layers, _, num_experts_per_tok = _get_routed_experts_shape(vllm_config)
+    return num_layers, num_experts_per_tok
+
+
 def get_routed_experts_bytes_per_token(vllm_config: VllmConfig) -> int:
     num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
         vllm_config

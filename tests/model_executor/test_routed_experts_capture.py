@@ -765,7 +765,14 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
     assert result is connector
 
 
-def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
+@pytest.mark.parametrize(
+    "first_tp_rank,last_pp_rank",
+    [(False, True), (True, False)],
+    ids=["non-first-tp-rank", "non-last-pp-stage"],
+)
+def test_aux_output_worker_connector_binds_capture_on_non_output_rank(
+    monkeypatch, first_tp_rank, last_pp_rank
+):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     capturer = Mock()
@@ -776,7 +783,12 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     monkeypatch.setattr(
         aux_output_worker,
         "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=False, world_size=1),
+        lambda: SimpleNamespace(is_first_rank=first_tp_rank, world_size=1),
+    )
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=last_pp_rank),
     )
 
     config = SimpleNamespace(
@@ -813,6 +825,9 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        aux_output_worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True)
+    )
     monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )
