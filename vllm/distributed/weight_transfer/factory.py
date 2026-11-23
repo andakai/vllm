@@ -232,6 +232,12 @@ WeightTransferEngineFactory.register_engine(
 )
 
 WeightTransferEngineFactory.register_engine(
+    "disk",
+    "vllm.distributed.weight_transfer.disk_engine",
+    "DiskWeightTransferEngine",
+)
+
+WeightTransferEngineFactory.register_engine(
     "sparse_nccl",
     "vllm.distributed.weight_transfer.sparse_nccl_engine",
     "SparseNCCLWeightTransferEngine",
@@ -268,6 +274,12 @@ WeightTransferTrainerFactory.register_engine(
     "ipc",
     "vllm.distributed.weight_transfer.ipc_engine",
     "IPCTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "disk",
+    "vllm.distributed.weight_transfer.disk_engine",
+    "DiskTrainerWeightTransferEngine",
 )
 
 WeightTransferTrainerFactory.register_engine(
