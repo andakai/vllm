@@ -289,6 +289,13 @@ class CacheConfig:
     queue, so they are evicted before other cached blocks. Clients usually drop
     the reasoning from the next turn's prompt, which makes these blocks
     unreachable. Requires `--reasoning-parser`."""
+    evict_tail_tokens_first: int = Field(default=0, ge=0)
+    """When a request finishes, free the whole blocks within its last this many
+    tokens to the front of the free queue, so they are evicted before other
+    cached blocks. A follow-up turn then recomputes at most this many tokens of
+    the conversation, rather than all of it once LRU evicts the whole
+    conversation. With a prefill budget of `xi` tokens and follow-up prompts of
+    about `q` new tokens, use `xi - q` (Tail-Optimized LRU). `0` disables it."""
     prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
     """Token interval between retained sliding-window and Mamba prefix-cache
     checkpoints. `0` retains only semantic checkpoints, including the latest
@@ -446,6 +453,7 @@ class CacheConfig:
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",
             "evict_reasoning_blocks_first",
+            "evict_tail_tokens_first",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",
