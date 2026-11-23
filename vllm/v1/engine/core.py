@@ -1099,6 +1099,7 @@ class EngineCore:
         level: int = 1,
         mode: PauseMode = "abort",
         reset_connector: bool = True,
+        keep_kv_cache: bool = False,
     ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
@@ -1112,6 +1113,9 @@ class EngineCore:
                 documentation of pause_scheduler method.
             reset_connector: Also reset the KV connector's cache; see
                 `LLM.sleep`.
+            keep_kv_cache: Back the KV cache up to CPU memory at level 1+
+                instead of discarding it, and keep the prefix cache and the
+                kept requests' KV; see `LLM.sleep`.
 
         """
         if self._checkpoint_state != CheckpointState.RUNNING:
@@ -1119,7 +1123,7 @@ class EngineCore:
                 f"Cannot sleep while the checkpoint state is {self._checkpoint_state}"
             )
         # Pause scheduler before sleeping.
-        clear_prefix_cache = level >= 1
+        clear_prefix_cache = level >= 1 and not keep_kv_cache
         pause_future = self.pause_scheduler(
             mode=mode,
             clear_cache=clear_prefix_cache,
@@ -1130,8 +1134,10 @@ class EngineCore:
 
         # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
+        # Executors without KV backup (e.g. CUDA checkpoint) reject the flag.
+        sleep_kwargs = {"keep_kv_cache": True} if keep_kv_cache else {}
         if pause_future is None:
-            model_executor.sleep(level)
+            model_executor.sleep(level, **sleep_kwargs)
             return None
 
         future = Future[Any]()
@@ -1139,7 +1145,7 @@ class EngineCore:
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                future.set_result(model_executor.sleep(level, **sleep_kwargs))
             except Exception as e:
                 future.set_exception(e)
 

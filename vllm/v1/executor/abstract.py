@@ -436,12 +436,14 @@ class Executor(ABC):
     def is_sleeping(self) -> bool:
         return bool(self.sleeping_tags)
 
-    def sleep(self, level: int = 1):
+    def sleep(self, level: int = 1, keep_kv_cache: bool = False):
         if "weights" in self.sleeping_tags:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.collective_rpc(
+            "sleep", kwargs=dict(level=level, keep_kv_cache=keep_kv_cache)
+        )
         time_after_sleep = time.perf_counter()
         self.sleeping_tags |= SLEEP_TAGS
         logger.info(

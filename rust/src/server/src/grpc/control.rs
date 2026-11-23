@@ -385,7 +385,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         let reset_connector = request.reset_connector.unwrap_or(true);
         let _guard = self.rl_lock.lock().await;
         self.client()
-            .sleep(level, mode, reset_connector)
+            .sleep(level, mode, reset_connector, false)
             .await
             .map_err(|error| utility_status("sleep", error))?;
         Ok(Response::new(pb::SleepResponse {}))

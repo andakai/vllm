@@ -1049,16 +1049,22 @@ impl EngineCoreClient {
             .all(|removed| removed))
     }
 
-    /// Put the engine to sleep.
+    /// Put the engine to sleep. With `keep_kv_cache`, the KV cache is backed
+    /// up to host memory instead of discarded.
     pub async fn sleep(
         &self,
         level: SleepLevel,
         mode: PauseMode,
         reset_connector: bool,
+        keep_kv_cache: bool,
     ) -> Result<()> {
         let recheck = self.inner.readiness().withdraw_until_recheck();
         self.inner
-            .call_utility::<(), _>("sleep", (level, mode, reset_connector), Some(recheck))
+            .call_utility::<(), _>(
+                "sleep",
+                (level, mode, reset_connector, keep_kv_cache),
+                Some(recheck),
+            )
             .await?;
         self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())

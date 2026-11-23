@@ -156,6 +156,18 @@ llm.release_kv_cache_memory()
 llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
 ```
 
+#### Keep the KV cache across sleep
+
+Pass `keep_kv_cache=True` (`POST /sleep?keep_kv_cache=true`) at level 1 or 2 to back the KV cache up to CPU memory instead of discarding it. The prefix cache is kept too, and requests retained with `mode="keep"` continue after the wake-up from their KV cache instead of recomputing it, as after a pause, while the GPU memory is free in between. The CPU memory must hold the whole KV cache in addition to what the level backs up.
+
+```python
+llm.sleep(level=1, mode="keep", keep_kv_cache=True)
+# ... the GPU memory is free, for example for a colocated training step
+llm.wake_up()  # Restore the weights and the KV cache, and resume scheduling.
+```
+
+As with a pause and `clear_cache=False`, the KV cache stays as computed before the sleep. If the weights change in between, the kept requests continue from KV computed with the old weights, and later requests may hit prefix-cache blocks computed with them.
+
 #### Keep the KV connector cache
 
 Discarding the KV cache, by a sleep at level 1 or 2 or by `release_kv_cache_memory()`, also resets a configured KV connector's cache, such as blocks offloaded to CPU or kept in an external store. Pass `reset_connector=False` to keep it, so that requests after the wake-up load those blocks instead of recomputing them:

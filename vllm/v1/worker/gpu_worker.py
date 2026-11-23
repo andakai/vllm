@@ -349,7 +349,7 @@ class Worker(WorkerBase):
             )
         return set(storage.values()) - preserved
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(self, level: int = 1, keep_kv_cache: bool = False) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
         # Level 2 keeps everything the weight update doesn't rewrite.
@@ -365,8 +365,8 @@ class Worker(WorkerBase):
         # reservation so views and graphs stay valid.
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None:
-            extensible_kv_cache.release_physical()
-        self.sleep_mode_backend.suspend(discardable)
+            extensible_kv_cache.release_physical(backup=keep_kv_cache)
+        self.sleep_mode_backend.suspend(discardable, keep_kv_cache)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
