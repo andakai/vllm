@@ -2314,6 +2314,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert hidden_states is not None
         draft_hidden_states = hidden_states
         if self.pcp_manager is not None:
+            if self.aux_output_connector is not None:
+                self.aux_output_connector.restore_pcp_rows(
+                    self.pcp_manager, hidden_states.shape[0]
+                )
             hidden_states, aux_hidden_states, input_batch = (
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )

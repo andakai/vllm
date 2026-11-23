@@ -82,8 +82,7 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
             "adaptive speculative verification",
         ),
         ({"pp": 2}, "pipeline parallelism"),
-        ({"dcp": 2}, "context parallelism"),
-        ({"pcp": 2}, "context parallelism"),
+        ({"dcp": 2}, "decode context parallelism"),
     ],
 )
 def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
@@ -93,7 +92,7 @@ def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"sliding_window": 4096}, {"attention_chunk_size": 4096}],
+    [{"sliding_window": 4096}, {"attention_chunk_size": 4096}, {"pcp": 2}],
 )
 def test_aux_output_config_defers_attention_layout_to_kv_config(kwargs):
     VllmConfig._verify_aux_output_compatibility(_config(**kwargs))

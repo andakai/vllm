@@ -818,6 +818,24 @@ class PCPManager:
         )
         return gathered_kv_slot_mappings
 
+    def restore_moe_rows(
+        self, rows: torch.Tensor, num_local_tokens: int
+    ) -> torch.Tensor:
+        """Per-token MoE rows (e.g. routed expert IDs) in the global batch's
+        token order. `rows` holds the PCP-gathered rows when the MoE gathers
+        tokens, else this rank's `num_local_tokens` rows."""
+        gathered = self._moe_is_padding is not None
+        if self._hidden_restore_idx is None:
+            # Unpartitioned step: every rank holds the same tokens.
+            return rows[:num_local_tokens]
+        if not gathered:
+            rows = get_pcp_group().all_gather(rows.contiguous(), dim=0)
+        return rows[self._hidden_restore_idx]
+
+    @property
+    def moe_gathers_tokens(self) -> bool:
+        return self._moe_is_padding is not None
+
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._hidden_restore_idx is None:
             return hidden_states

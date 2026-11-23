@@ -57,6 +57,7 @@ def _capturer_with_buffer(
     num_experts_per_tok: int = 2,
     dp_rank: int = 0,
     tp_size: int = 1,
+    pcp_size: int = 1,
     dtype: torch.dtype = torch.int32,
 ) -> RoutedExpertsCapturer:
     # Bypass __init__ so the test can use a CPU buffer and skip the
@@ -65,6 +66,7 @@ def _capturer_with_buffer(
     c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     c.dp_rank = dp_rank
     c.tp_size = tp_size
+    c.pcp_size = pcp_size
     c.restore_rows = c._restore_local_topk_ids
     c.output_dtype = torch.uint8
     c.device_buffer = torch.full(
@@ -561,7 +563,11 @@ def test_routed_experts_capturer_exposes_output_profile(
             get_num_experts_per_tok=lambda: 2,
             hf_text_config=SimpleNamespace(model_type="test"),
         ),
-        parallel_config=SimpleNamespace(data_parallel_rank=0, tensor_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            data_parallel_rank=0,
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
 
     capturer = RoutedExpertsCapturer(8, config)
@@ -765,7 +771,14 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
     assert result is connector
 
 
-def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
+@pytest.mark.parametrize(
+    "first_tp_rank,first_pcp_rank",
+    [(False, True), (True, False)],
+    ids=["non-first-tp-rank", "non-first-pcp-rank"],
+)
+def test_aux_output_worker_connector_binds_capture_on_non_output_rank(
+    monkeypatch, first_tp_rank, first_pcp_rank
+):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     capturer = Mock()
@@ -776,7 +789,12 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     monkeypatch.setattr(
         aux_output_worker,
         "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=False, world_size=1),
+        lambda: SimpleNamespace(is_first_rank=first_tp_rank, world_size=1),
+    )
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_pcp_group",
+        lambda: SimpleNamespace(is_first_rank=first_pcp_rank),
     )
 
     config = SimpleNamespace(
@@ -813,6 +831,9 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        aux_output_worker, "get_pcp_group", lambda: SimpleNamespace(is_first_rank=True)
+    )
     monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )
@@ -881,3 +902,14 @@ def test_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+def test_capture_keeps_pcp_gathered_rows():
+    """With PCP, an MoE that gathers tokens routes every rank's rows; they are
+    kept as they are for the model runner to reorder."""
+    capturer = _capturer_with_buffer(max_tokens=8, pcp_size=2)
+    ids = torch.arange(12, dtype=torch.int32).view(6, 2)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=3))
+    with override_forward_context(ctx):
+        capturer.capture(0, ids)
+    torch.testing.assert_close(capturer.device_buffer[:6, 0], ids)
