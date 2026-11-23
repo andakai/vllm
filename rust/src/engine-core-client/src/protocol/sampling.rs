@@ -108,6 +108,8 @@ pub struct EngineCoreSamplingParams {
     pub prompt_logprob_token_ids: Option<WireNdArray>,
     /// First causal prompt row to score; `None` scores from the first row.
     pub prompt_logprob_start: Option<u32>,
+    /// Temperature for prompt logprob scoring; `None` scores at 1.
+    pub prompt_logprobs_temperature: Option<f32>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.
@@ -185,6 +187,7 @@ impl EngineCoreSamplingParams {
             prompt_logprobs: None,
             prompt_logprob_token_ids: None,
             prompt_logprob_start: None,
+            prompt_logprobs_temperature: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,

@@ -105,6 +105,9 @@ pub struct SamplingParams {
     pub prompt_logprob_token_ids: Option<Vec<Vec<i32>>>,
     /// First causal prompt row to score; `None` scores from the first row.
     pub prompt_logprob_start: Option<u32>,
+    /// Temperature for prompt logprob scoring: rows are scored from
+    /// `logits / prompt_logprobs_temperature`. `None` scores at 1.
+    pub prompt_logprobs_temperature: Option<f32>,
     /// Minimum probability threshold for token sampling. `None` means no
     /// explicit user override.
     pub min_p: Option<f32>,
@@ -180,6 +183,7 @@ impl Default for SamplingParams {
             prompt_logprobs: None,
             prompt_logprob_token_ids: None,
             prompt_logprob_start: None,
+            prompt_logprobs_temperature: None,
             min_p: None,
             frequency_penalty: None,
             presence_penalty: None,

@@ -44,6 +44,7 @@ class PromptLogprobsWorker:
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.prompt_logprob_start = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.temperature = np.ones(self.max_num_reqs, dtype=np.float32)
         # req_idx -> list of in-progress LogprobsTensors
         self.in_progress_prompt_logprobs: dict[str, list[LogprobsTensors]] = {}
         # req_id -> fixed-ID scoring state
@@ -54,6 +55,7 @@ class PromptLogprobsWorker:
         self.uses_prompt_logprobs[req_idx] = uses_prompt_logprobs
         self.num_prompt_logprobs[req_idx] = sampling_params.prompt_logprobs or 0
         self.prompt_logprob_start[req_idx] = sampling_params.prompt_logprob_start or 0
+        self.temperature[req_idx] = sampling_params.prompt_logprobs_temperature or 1.0
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
         if sampling_params.prompt_logprob_token_ids is not None:
@@ -87,6 +89,7 @@ class PromptLogprobsWorker:
             req_idx = input_batch.idx_mapping_np[i]
             prompt_len = int(prompt_lens[req_idx])
             start = int(self.prompt_logprob_start[req_idx])
+            temperature = float(self.temperature[req_idx])
             chunk_start = int(input_batch.num_computed_prefill_tokens_np[i])
             chunk_end = chunk_start + int(input_batch.num_scheduled_tokens[i])
             # Skip decode steps and, as compute_prompt_logprobs does, requests
@@ -109,6 +112,8 @@ class PromptLogprobsWorker:
             for a in range(lo, hi, CHUNK_SIZE):
                 b = min(a + CHUNK_SIZE, hi)
                 logits = logits_fn(hidden_states[base + a : base + b])
+                if temperature != 1.0:
+                    logits = logits.float() / temperature
                 ids = req.token_ids[a - start : b - start]
                 req.scores[a - start : b - start] = (
                     logits.gather(-1, ids)
@@ -167,6 +172,15 @@ class PromptLogprobsWorker:
             num_computed_tokens,
             all_token_ids,
         )
+        temperatures = self.temperature[idx_mapping_np]
+        token_temperatures = None
+        if np.any(temperatures[needs_prompt_logprobs] != 1.0):
+            # Rows follow query_start_loc; padding rows keep temperature 1.
+            per_token = np.ones(input_batch.num_tokens, dtype=np.float32)
+            query_start_loc = input_batch.query_start_loc_np
+            for i, temperature in enumerate(temperatures):
+                per_token[query_start_loc[i] : query_start_loc[i + 1]] = temperature
+            token_temperatures = async_tensor_h2d(per_token, self.device, torch.float32)
         prompt_token_ids, prompt_logprobs, prompt_ranks = (
             compute_prompt_logprobs_with_chunking(
                 prompt_logprobs_token_ids,
@@ -174,6 +188,7 @@ class PromptLogprobsWorker:
                 logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
+                token_temperatures,
             )
         )
 
@@ -293,7 +308,10 @@ def compute_prompt_logprobs_with_chunking(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
+    token_temperatures: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Scores prompt rows in chunks; with `token_temperatures` ([num_tokens]),
+    row i is scored from its logits / token_temperatures[i]."""
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
     num_tokens = prompt_token_ids.shape[0]
@@ -306,6 +324,10 @@ def compute_prompt_logprobs_with_chunking(
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
         prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+        if token_temperatures is not None:
+            prompt_logits = (
+                prompt_logits.float() / token_temperatures[start_idx:end_idx, None]
+            )
         requested_num = (
             prompt_logits.shape[-1]
             if num_prompt_logprobs == -1

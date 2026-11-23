@@ -235,6 +235,7 @@ pub(crate) fn prepare_responses_request(
             prompt_logprobs: None,
             prompt_logprob_token_ids: None,
             prompt_logprob_start: None,
+            prompt_logprobs_temperature: None,
             min_p,
             frequency_penalty,
             presence_penalty,
