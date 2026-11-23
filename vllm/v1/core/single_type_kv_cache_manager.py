@@ -741,15 +741,30 @@ class SingleTypeKVCacheManager(ABC):
         self._partial_hit_reqs.pop(request_id, None)
         return trim_null_head(req_blocks)
 
-    def free(self, request_id: str) -> None:
+    # Whether a request's block `i` holds tokens `[i * block_size, ...)`, so
+    # `free` can split the blocks by token position.
+    blocks_follow_token_positions: ClassVar[bool] = False
+
+    def free(self, request_id: str, evict_first_from: int | None = None) -> None:
         """Free the blocks for the request.
 
         Args:
             request_id: The request ID.
+            evict_first_from: If set and the blocks follow token positions,
+                the blocks from the one holding this token on go to the front
+                of the free queue, to be evicted before other cached blocks.
 
         """
+        num_blocks = len(self.req_to_blocks.get(request_id, ()))
+        blocks = self.pop_blocks_for_free(request_id)
+        split = len(blocks)
+        if evict_first_from is not None and self.blocks_follow_token_positions:
+            # `blocks` lacks the null head that `pop_blocks_for_free` trims.
+            num_trimmed = num_blocks - len(blocks)
+            split = max(0, evict_first_from // self.block_size - num_trimmed)
         # Free blocks in reverse order so that the tail blocks are freed first.
-        self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
+        self.block_pool.free_blocks(reversed(blocks[split:]), evict_first=True)
+        self.block_pool.free_blocks(reversed(blocks[:split]))
 
     def cache_blocks_on_free(self, request: Request) -> None:
         """Cache blocks that are only retained once the request is freed."""
@@ -901,6 +916,7 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    blocks_follow_token_positions: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(
@@ -1107,6 +1123,8 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    blocks_follow_token_positions: ClassVar[bool] = True
+
     @dataclass(frozen=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         sliding_window: int
@@ -1434,6 +1452,8 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
     only past the last target token, and everything from `h` on is
     recomputed.
     """
+
+    blocks_follow_token_positions: ClassVar[bool] = False
 
     @dataclass(frozen=True, slots=True)
     class Params(SlidingWindowManager.Params):
@@ -2906,6 +2926,8 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 
 class SinkFullAttentionManager(FullAttentionManager):
+    blocks_follow_token_positions: ClassVar[bool] = False
+
     @dataclass(frozen=True, kw_only=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         sink_len: int
@@ -2923,6 +2945,8 @@ class HiSparseSourceManager(FullAttentionManager):
     Every page gets a host block: allocation fails when the host pool cannot
     back it, so each GPU-resident page can be written back and later reclaimed.
     """
+
+    blocks_follow_token_positions: ClassVar[bool] = False
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 

@@ -647,16 +647,18 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
-    def free(self, request: Request) -> None:
+    def free(self, request: Request, evict_first_from: int | None = None) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
         first when caching is enabled.
 
         Args:
             request: The request to free the blocks.
+            evict_first_from: If set, the blocks from the one holding this
+                token on are evicted before other cached blocks.
 
         """
-        self.coordinator.free(request)
+        self.coordinator.free(request, evict_first_from)
 
     def remove_skipped_blocks(
         self,
