@@ -38,6 +38,7 @@ default [layerwise reload](../layerwise.md).
 | ------- | --------- | -------- |
 | [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
+| [inline](inline.md) | safetensors in the update requests | Trainer reaches the server over HTTP only: no NCCL path or shared filesystem; small updates |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
 | [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 | [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
