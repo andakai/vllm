@@ -558,18 +558,22 @@ async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
+async def test_serve_tokens_returns_per_choice_spec_decode_metrics_for_n_gt_1(
     stream: bool,
 ):
+    """With n>1 each choice carries its own sequence's metrics and the
+    request-level `metrics` stays absent."""
     engine = _mock_engine()
-    metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
+    metrics = [RequestSpecDecodeMetrics.new(num_spec_tokens=3) for _ in range(2)]
+    metrics[0].observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
+    metrics[1].observe(num_draft_tokens=3, num_accepted=0, num_verified_tokens=3)
+    metrics[1].observe(num_draft_tokens=3, num_accepted=3, num_verified_tokens=3)
     result = _make_request_output(
         "req-1",
         token_ids=[10],
         finish_reason="stop",
         finished=True,
-        spec_decode_metrics=metrics,
+        spec_decode_metrics=metrics[0],
     )
     result.outputs.append(
         CompletionOutput(
@@ -579,7 +583,7 @@ async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
             cumulative_logprob=None,
             logprobs=None,
             finish_reason="stop",
-            spec_decode_metrics=metrics,
+            spec_decode_metrics=metrics[1],
         )
     )
 
@@ -598,15 +602,26 @@ async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
 
     response = await serving.serve_tokens(request)
     if stream:
-        chunks = [chunk async for chunk in response]
-        assert all(
-            "metrics" not in chunk
-            for chunk in _parse_sse_chunks(chunks)
+        chunks = [
+            chunk
+            for chunk in _parse_sse_chunks([chunk async for chunk in response])
             if isinstance(chunk, dict)
-        )
+        ]
+        assert all("metrics" not in chunk for chunk in chunks)
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
     else:
         assert isinstance(response, GenerateTokensResponse)
         assert response.metrics is None
+        choices = response.model_dump()["choices"]
+
+    by_index = {
+        choice["index"]: (
+            choice["speculative_decoding"]["num_spec_steps"],
+            choice["speculative_decoding"]["num_accepted_draft_tokens"],
+        )
+        for choice in choices
+    }
+    assert by_index == {0: (1, 2), 1: (2, 3)}
 
 
 @pytest.mark.asyncio

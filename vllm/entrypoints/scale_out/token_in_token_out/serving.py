@@ -24,6 +24,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
+    choice_spec_decoding_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -611,6 +612,9 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
+                speculative_decoding=choice_spec_decoding_metrics(
+                    output, sampling_params.n
+                ),
             )
             if derender_mode:
                 derender_choice_fields.append(choice_fields)
@@ -904,6 +908,9 @@ class ServingTokens(GenerateBaseServing):
                         routed_experts=routed_experts_b64,
                         sampling_mask=sampling_mask,
                         weight_versions=output.weight_versions,
+                        speculative_decoding=choice_spec_decoding_metrics(
+                            output, sampling_params.n
+                        ),
                     )
                     choice: GenerateStreamChoiceBase
                     if derender_mode:

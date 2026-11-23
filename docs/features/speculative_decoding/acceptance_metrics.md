@@ -37,6 +37,11 @@ sits alongside the timing fields. Like timing, they describe a single generation
 stream, so they are reported only for single-sequence requests and are `null`
 for `n > 1`.
 
+For `n > 1`, `/inference/v1/generate` (Python frontend) returns each sequence's
+metrics on its choice instead, as `choices[i].speculative_decoding`, with the same
+fields. In streaming responses it is set on the chunk that carries the choice's
+`finish_reason`. The other endpoints return no acceptance metrics for `n > 1`.
+
 A `summary` response's `metrics` looks like:
 
 ```json
