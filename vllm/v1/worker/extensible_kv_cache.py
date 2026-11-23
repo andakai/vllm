@@ -121,6 +121,8 @@ class ExtensibleKVCache:
         # Bytes torch's caching allocator may reserve, set once the cache is
         # sized; None leaves it unlimited.
         self.torch_memory_limit: int | None = None
+        # Per-segment host copies taken by `release_physical(backup=True)`.
+        self._host_backup: list[torch.Tensor] | None = None
         self.buffer = ExtensibleTensor(
             self.size,
             device=device,
@@ -364,15 +366,27 @@ class ExtensibleKVCache:
                 )
         return committed
 
-    def release_physical(self) -> None:
-        """Drop physical pages for sleep; addresses and views stay valid."""
+    def release_physical(self, backup: bool = False) -> None:
+        """Drop physical pages for sleep; addresses and views stay valid. With
+        `backup`, first copy the committed bytes to pinned host memory, which
+        `recommit` copies back."""
+        if backup:
+            self._host_backup = []
+            for i in range(self.buffer.num_segments):
+                view = self.buffer.segment_view(i)
+                host = torch.empty(view.shape, dtype=view.dtype, pin_memory=True)
+                self._host_backup.append(host.copy_(view))
         self.buffer.release_physical()
 
     def recommit(self) -> None:
-        """Map fresh zeroed pages for the blocks committed before release."""
+        """Map fresh zeroed pages for the blocks committed before release, and
+        restore their contents if `release_physical` backed them up."""
         num_blocks = self.num_committed_blocks
         self.num_committed_blocks = 0
         self.commit(num_blocks)
+        backup, self._host_backup = self._host_backup, None
+        for i, host in enumerate(backup or ()):
+            self.buffer.segment_view(i).copy_(host)
 
     def set_torch_memory_limit(self, num_bytes: int | None) -> None:
         """Cap what torch's caching allocator reserves on this device, or lift

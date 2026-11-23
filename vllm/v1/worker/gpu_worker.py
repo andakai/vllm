@@ -365,11 +365,7 @@ class Worker(WorkerBase):
         # reservation so views and graphs stay valid.
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None:
-            if keep_kv_cache:
-                raise ValueError(
-                    "keep_kv_cache is not supported with the extensible KV cache."
-                )
-            extensible_kv_cache.release_physical()
+            extensible_kv_cache.release_physical(backup=keep_kv_cache)
         self.sleep_mode_backend.suspend(discardable, keep_kv_cache)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
