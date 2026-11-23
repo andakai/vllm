@@ -238,6 +238,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_block_zeroer: KVBlockZeroer | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
+        self.suppress_token_ids: torch.Tensor | None = None
+        if suppress := self.model_config.suppress_token_ids:
+            if not all(0 <= i < self.vocab_size for i in suppress):
+                raise ValueError(
+                    f"suppress_token_ids must be in [0, {self.vocab_size}), "
+                    f"got {suppress}."
+                )
+            self.suppress_token_ids = async_tensor_h2d(
+                sorted(set(suppress)), self.device, torch.long
+            )
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
@@ -1059,6 +1069,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
+    def _suppress_tokens(self, logits: torch.Tensor) -> torch.Tensor:
+        """Set the logits of `--suppress-token-ids` to -inf, in place."""
+        if self.suppress_token_ids is not None:
+            logits.index_fill_(1, self.suppress_token_ids, float("-inf"))
+        return logits
+
+    def _compute_prompt_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self._suppress_tokens(self.model.compute_logits(hidden_states))
+
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         assert self.sampler is not None
@@ -1758,6 +1777,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model_state.compute_sample_logits(sample_hidden_states)
+        logits = self._suppress_tokens(logits)
 
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
@@ -2332,8 +2352,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         assert self.prompt_logprobs_worker is not None
+        logits_fn = self._compute_prompt_logits
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
-            self.model.compute_logits,
+            logits_fn,
             hidden_states,
             input_batch,
             self.req_states.all_token_ids.gpu,
@@ -2342,7 +2363,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         prompt_token_id_logprobs_dict = (
             self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
-                self.model.compute_logits,
+                logits_fn,
                 hidden_states,
                 input_batch,
                 self.req_states.prompt_len.np,

@@ -1740,3 +1740,45 @@ def test_trace_replay_with_spec_decode():
                 rel_tol=5e-2,
                 abs_tol=2.5e-1,
             )
+
+
+def test_suppress_token_ids():
+    """`suppress_token_ids` keeps the IDs out of samples and of every returned
+    logprob, renormalizing over the other tokens, for sampling and for prompt
+    rows."""
+    prompt = "The capital of France is"
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B", max_model_len=256, gpu_memory_utilization=0.25
+    ) as vllm_model:
+        tokenizer = vllm_model.llm.get_tokenizer()
+        token_prompt = TokensPrompt(prompt_token_ids=tokenizer(prompt).input_ids)
+        params = SamplingParams(
+            temperature=0, max_tokens=8, logprobs=20, prompt_logprobs=20
+        )
+        (base,) = vllm_model.llm.generate([token_prompt], params)
+    # Suppress the greedy first token and the top prompt candidates, keeping
+    # the prompt's own tokens, which every prompt row reports.
+    prompt_ids = set(token_prompt["prompt_token_ids"])
+    banned = {base.outputs[0].token_ids[0]} - prompt_ids
+    for row in base.prompt_logprobs[1:]:
+        ranked = sorted(row, key=lambda t: -row[t].logprob)
+        banned.update([t for t in ranked if t not in prompt_ids][:2])
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=256,
+        gpu_memory_utilization=0.25,
+        suppress_token_ids=sorted(banned),
+    ) as vllm_model:
+        (out,) = vllm_model.llm.generate([token_prompt], params)
+
+    assert not banned & set(out.outputs[0].token_ids)
+    rows = [*out.outputs[0].logprobs, *out.prompt_logprobs[1:]]
+    for row in rows:
+        assert not banned & set(row)
+    # Prompt rows: remaining candidates are renormalized, so each keeps its
+    # relative score and gains the same constant.
+    for before, after in zip(base.prompt_logprobs[1:], out.prompt_logprobs[1:]):
+        shared = [t for t in after if t in before and t not in banned]
+        shifts = [after[t].logprob - before[t].logprob for t in shared]
+        assert max(shifts) - min(shifts) < 1e-2
+        assert min(shifts) > 0

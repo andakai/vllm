@@ -430,6 +430,12 @@ class ModelConfig:
     logits_processors: list[str | type[LogitsProcessor]] | None = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
+    suppress_token_ids: list[int] | None = None
+    """Token IDs whose target-model logits are set to -inf for every request,
+    for example padded vocabulary rows or multimodal placeholder tokens. Unlike
+    a per-request `logit_bias`, the mask also applies to speculative-decoding
+    verification and to prompt logprobs, so every returned logprob is
+    normalized over the remaining tokens."""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
     renderer_num_workers: int = 1
@@ -509,6 +515,7 @@ class ModelConfig:
             "hf_token",
             "hf_overrides",
             "logits_processors",
+            "suppress_token_ids",
             "io_processor_plugin",
             "pooler_config",
             "multimodal_config",
