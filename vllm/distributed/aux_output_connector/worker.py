@@ -28,7 +28,7 @@ from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
@@ -113,9 +113,9 @@ class AuxOutputWorkerConnector:
 
     def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
         """Create the output data plane once the KV cache layout is resolved."""
-        # Every TP rank participates in capture collectives, but only the
-        # executor output rank owns the auxiliary output data plane.
-        if not get_tp_group().is_first_rank:
+        # Every TP and PCP rank participates in capture collectives, but only
+        # the executor output rank owns the auxiliary output data plane.
+        if not (get_tp_group().is_first_rank and get_pcp_group().is_first_rank):
             return
 
         vllm_config = self._vllm_config
