@@ -446,6 +446,7 @@ async def test_derender_chat_metrics_passthrough(client):
         "queue_time_ms",
         "mean_itl_ms",
         "tokens_per_second",
+        "num_preemptions",
         "speculative_decoding",
     }
     assert all(

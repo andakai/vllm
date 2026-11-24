@@ -1262,6 +1262,7 @@ mod tests {
                     scheduled_ts: 10.2,
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
+                    num_preemptions: 0,
                 },
                 spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                     num_spec_tokens: 3,

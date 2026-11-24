@@ -41,7 +41,8 @@ When per-request metrics are enabled, the response includes a `metrics` object:
     "generation_time_ms": 1240.5,
     "queue_time_ms": 12.3,
     "mean_itl_ms": 9.1,
-    "tokens_per_second": 103.2
+    "tokens_per_second": 103.2,
+    "num_preemptions": 0
   }
 }
 ```
@@ -53,6 +54,7 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 | `queue_time_ms` | Time the request spent waiting in the scheduler queue before processing began. |
 | `mean_itl_ms` | Mean inter-token latency (average time between successive output tokens) during the decode phase. `null` for single-token responses. |
 | `tokens_per_second` | Overall output token throughput: all generated tokens over the inference interval (scheduling to last output token). Unlike `generation_time_ms`, this includes the prefill phase, so it reflects end-to-end generation speed rather than pure decode speed. |
+| `num_preemptions` | How many times the scheduler preempted the request to free KV cache. A preempted request's KV is computed again when it resumes, unless the prefix cache still holds it. |
 
 All fields are `null` if the underlying timing data is not available for that
 request.

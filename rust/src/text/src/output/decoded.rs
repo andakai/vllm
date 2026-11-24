@@ -633,6 +633,7 @@ mod tests {
                             scheduled_ts: 9.0,
                             first_token_ts: 10.0,
                             last_token_ts: 11.5,
+                            num_preemptions: 0,
                         },
                         ..GenerateOutput::for_test(
                             None,
@@ -672,6 +673,7 @@ mod tests {
                                 scheduled_ts: 9.0,
                                 first_token_ts: 10.0,
                                 last_token_ts: 11.5,
+                                num_preemptions: 0,
                             },
                             weight_versions: None,
                             routed_experts: None,
@@ -930,6 +932,7 @@ mod tests {
             scheduled_ts: 2.0,
             first_token_ts: 3.0,
             last_token_ts: 4.0,
+            num_preemptions: 0,
         };
         let raw_stream = DropRecordingStream {
             // The engine output is not terminal. The frontend terminates the

@@ -20,13 +20,15 @@ const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 
-/// Engine lifecycle timestamps used by frontend per-request response metrics.
+/// Engine lifecycle timestamps and preemption count used by frontend
+/// per-request response metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RequestTimestamps {
     pub queued_ts: f64,
     pub scheduled_ts: f64,
     pub first_token_ts: f64,
     pub last_token_ts: f64,
+    pub num_preemptions: u64,
 }
 
 /// Request-scoped metrics state tracked across streamed engine-core updates.
@@ -401,6 +403,7 @@ impl RequestMetricsTracker {
             scheduled_ts: self.scheduled_ts,
             first_token_ts: self.first_token_ts,
             last_token_ts: self.last_token_ts,
+            num_preemptions: self.num_preemptions,
         }
     }
 
@@ -624,6 +627,7 @@ mod tests {
                 scheduled_ts: 9.0,
                 first_token_ts: 10.0,
                 last_token_ts: 11.5,
+                num_preemptions: 1,
             }
         );
         assert!((tracker.first_token_latency - 0.2).abs() < 1e-9);

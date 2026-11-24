@@ -132,6 +132,7 @@ class PerRequestMetrics(OpenAIBaseModel):
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    num_preemptions: int | None = None
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
 
