@@ -45,6 +45,7 @@ restorer; the existing buffer-write semantics are unchanged.
 | `/inference/v1/generate` | `routed_experts` per choice (base64 `.npy`); with `stream: true`, on the final chunk |
 
 - **Shape:** `(num_tokens - 1 - routed_experts_prompt_start, num_moe_layers, num_experts_per_tok)`, `num_tokens` = prompt + output. The last sampled token has no row.
+- **Layers:** only the layers that route, in layer order. Dense layers, such as the first `first_k_dense_replace` layers of DeepSeek models or the Mamba and attention layers of Nemotron-H, have no column.
 - **Rows:** row `i` is position `routed_experts_prompt_start + i` of `prompt_token_ids + output_token_ids`.
 - **dtype:** `uint8` for at most 256 experts, else `uint16`; logical expert IDs.
 - Filled only when the request finishes. `None` if the flag is off or the request aborted before any forward pass.
@@ -102,7 +103,7 @@ Keeping the cache or the connector tier across an update means later turns reuse
 
 ## Sizing `max_bytes`
 
-Rows per token take `num_hidden_layers × num_experts_per_tok × itemsize` bytes, with `itemsize` 1 for at most 256 experts and 2 above; every hidden layer counts, dense ones included.
+Rows per token take `num_moe_layers × num_experts_per_tok × itemsize` bytes, with `itemsize` 1 for at most 256 experts and 2 above. `max_bytes` is converted to a block count with `num_hidden_layers` in place of `num_moe_layers`, so for a model with dense layers it holds that many tokens in proportionally less memory.
 
 - **Default (`max_bytes` unset).** One block of rows per KV block: the KV cache token capacity, logged at startup as `KV cache size: N tokens`, times the bytes per token, doubled when a KV connector is configured. The arena is anonymous memory, committed as rows are written.
 - **A smaller `max_bytes` does not save memory.** Rows of blocks in the GPU prefix cache are never evicted. When they outgrow `max_bytes`, the store copies its whole arena into one at least twice as large and logs a warning, a latency spike for the steps that wait on the store. The LRU drops only rows of blocks the scheduler no longer holds, so the rows of a session last as long as its KV does.
