@@ -149,8 +149,9 @@ pub struct SamplingParams {
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
     /// Number of prompt tokens to skip from returned routed-expert data.
-    /// `None` returns routing for the whole prompt.
-    pub routed_experts_prompt_start: Option<u32>,
+    /// `None` returns routing for the whole prompt; -1 starts at the last
+    /// prompt token, giving one row per output token.
+    pub routed_experts_prompt_start: Option<i64>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the

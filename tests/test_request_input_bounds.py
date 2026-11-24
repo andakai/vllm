@@ -99,7 +99,7 @@ def test_prompt_embeds_valid_inputs_preserved(prompt_embeds_processor, token_ids
     assert request.prompt_is_token_ids == mask
 
 
-@pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
+@pytest.mark.parametrize("offset", [-2, -1, 0, 2, 3, 4, 2**127])
 def test_routed_experts_offset_validated_before_engine_submission(offset):
     """Reject invalid offsets even when routed-expert output is disabled."""
     processor = Mock(spec=InputProcessor)
@@ -111,7 +111,7 @@ def test_routed_experts_offset_validated_before_engine_submission(offset):
     params = SamplingParams(routed_experts_prompt_start=offset)
     prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
 
-    if not 0 <= offset <= 3:
+    if not -1 <= offset <= 3:
         with pytest.raises(VLLMValidationError, match="routed_experts_prompt_start"):
             InputProcessor.process_inputs(
                 processor, "invalid", prompt, params, ("generate",)
@@ -121,10 +121,9 @@ def test_routed_experts_offset_validated_before_engine_submission(offset):
     request = InputProcessor.process_inputs(
         processor, "valid", prompt, params, ("generate",)
     )
-    assert (
-        request.sampling_params.routed_experts_prompt_start
-        == params.routed_experts_prompt_start
-    )
+    # -1 starts at the last prompt token: one row per output token.
+    expected = 2 if offset == -1 else params.routed_experts_prompt_start
+    assert request.sampling_params.routed_experts_prompt_start == expected
 
 
 def _process_inputs_with_max_model_len(

@@ -449,7 +449,9 @@ class SamplingParams(
     data. In multi-turn agent scenarios, set this to the length of the
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
+    tokens. -1 starts at the last prompt token, giving one row per output
+    token (the position that sampled it) without the client knowing the
+    prompt length."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are

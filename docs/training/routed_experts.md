@@ -58,7 +58,9 @@ experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 
 ## `routed_experts_prompt_start`
 
-Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
+Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `-1` or `0 <= value <= prompt_len`, else HTTP 400.
+
+`-1` resolves to `prompt_len - 1` after chat templating and multimodal expansion: the response has one row per output token, row `i` being the position that sampled output token `i`. Use it when the client trains only on the output and does not know the prompt length. Since no prompt row is needed before that position, KV of the prompt before it, from the prefix cache or a KV connector, is reused even when its rows are gone. A prefill/decode decode engine still computes the prompt again with `-1`, because the row at the last prompt position comes from the prefill forward: send `-1` to the prefill engine and `prompt_len` to the decode engine, then prepend the prefill engine's single row to the decode engine's rows. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
 
 ## Row storage
 
