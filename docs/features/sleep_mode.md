@@ -82,6 +82,8 @@ During RLHF training, vLLM allows you to selectively wake up only the model weig
 
 Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates. **Note** that `is_sleeping` will report `true` until all components are awake.
 
+While the weights sleep, RPCs that access them (`reload_weights`, `reset_weights`, `compute_weight_checksums`, and the `start_weight_update` / `update_weights` / `finish_weight_update` steps) fail with an error instead of reaching the workers; wake the weights first.
+
 ```python
 # Put engine to deep sleep (level=2)
 llm.sleep(level=2)

@@ -125,6 +125,19 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
+# Worker RPCs that access the weights, which are unmapped while they sleep.
+_WEIGHT_RPCS = frozenset(
+    (
+        "reload_weights",
+        "reset_weights",
+        "compute_weight_checksums",
+        "start_weight_update",
+        "start_draft_weight_update",
+        "update_weights",
+        "finish_weight_update",
+    )
+)
+
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
@@ -1253,6 +1266,11 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        if method in _WEIGHT_RPCS and "weights" in self.model_executor.sleeping_tags:
+            raise RuntimeError(
+                f"{method} requires the weights to be awake; "
+                'call wake_up(tags=["weights"]) first'
+            )
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def set_weight_version(self, weight_version: str) -> None:

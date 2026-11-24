@@ -905,6 +905,28 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
 
 
 @pytest.mark.parametrize(
+    ("sleeping_tags", "rejected"),
+    [(set(), False), ({"kv_cache"}, False), ({"weights", "kv_cache"}, True)],
+)
+def test_weight_rpcs_require_awake_weights(sleeping_tags, rejected):
+    """A weight RPC is rejected before reaching the workers while the weights sleep;
+    other RPCs still go through."""
+    core = _pausable_engine_core_proc()
+    core.model_executor.sleeping_tags = sleeping_tags
+
+    if rejected:
+        with pytest.raises(RuntimeError, match="requires the weights to be awake"):
+            core.collective_rpc("reload_weights")
+    else:
+        core.collective_rpc("reload_weights")
+    core.collective_rpc("reset_mm_cache")
+
+    calls = core.model_executor.collective_rpc.call_args_list
+    expected = ["reset_mm_cache"] if rejected else ["reload_weights", "reset_mm_cache"]
+    assert [c.args[0] for c in calls] == expected
+
+
+@pytest.mark.parametrize(
     ("tags", "republished"), [(None, True), (["kv_cache"], True), (["weights"], False)]
 )
 def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
