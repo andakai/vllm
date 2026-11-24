@@ -80,7 +80,10 @@ def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module
 
 
 def maybe_share_target_embed(
-    draft_model: nn.Module, draft_inner: nn.Module, target_inner: nn.Module
+    draft_model: nn.Module,
+    draft_inner: nn.Module,
+    target_inner: nn.Module,
+    can_share: bool = True,
 ) -> None:
     """Share the target input embedding with the drafter when needed."""
     target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
@@ -106,7 +109,9 @@ def maybe_share_target_embed(
             )
         return
 
-    if _should_share(draft_model, "has_own_embed_tokens", draft_embed, target_embed):
+    if can_share and _should_share(
+        draft_model, "has_own_embed_tokens", draft_embed, target_embed
+    ):
         if draft_embed is not None:
             del draft_inner.embed_tokens
         draft_inner.embed_tokens = target_embed
@@ -135,12 +140,14 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     target_inner = target_language_model.model
     draft_inner = eagle_model.model
 
-    maybe_share_target_embed(eagle_model, draft_inner, target_inner)
+    can_share = speculative_config.share_target_weights
+    maybe_share_target_embed(eagle_model, draft_inner, target_inner, can_share)
 
     draft_head = share_target_lm_head(
         eagle_model,
         get_target_lm_head(target_model, target_language_model),
         speculative_config.draft_lm_head_quantization,
+        can_share,
     )
     if draft_head is not None:
         # MTP layers route logits through layer.shared_head.head, not

@@ -587,6 +587,14 @@ class SpeculativeConfig:
     activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
     own head, so only the acceptance length can change."""
+    share_target_weights: bool = True
+    """Let an EAGLE or MTP drafter use the target's input embedding and lm_head
+    when it has no copy of its own or its copy equals the target's. Set False
+    to keep the drafter's own copies when its weights are loaded after start
+    (`load_format="dummy"` and draft weight updates): dummy weights compare
+    equal, so the drafter would share the target's tensors, and a draft update
+    would write into the target. The drafter's checkpoint must then include
+    them."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -788,6 +796,7 @@ class SpeculativeConfig:
             "disable_eagle_block_drop",
             "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
+            "share_target_weights",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
             "prompt_lookup_min",
