@@ -472,6 +472,33 @@ def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
     assert kv_cache.torch_memory_limit is None
 
 
+def test_released_cache_lifts_the_torch_memory_cap(monkeypatch):
+    """While the physical memory is released, torch may use it; recommitting
+    restores the cap."""
+    fractions: list[float] = []
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda *args: (0, 100 << 30)
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_per_process_memory_fraction",
+        lambda fraction, device: fractions.append(fraction),
+    )
+    kv_cache = object.__new__(ExtensibleKVCache)
+    kv_cache.buffer = SimpleNamespace(
+        device=torch.device("cpu"), release_physical=lambda: None
+    )
+    kv_cache.num_committed_blocks = 2
+    kv_cache.commit = lambda num_blocks: None
+    kv_cache._released_torch_memory_limit = None
+    kv_cache.set_torch_memory_limit(25 << 30)
+    kv_cache.release_physical()
+    kv_cache.release_physical()
+    kv_cache.recommit()
+    assert fractions == [0.25, 1.0, 0.25]
+    assert kv_cache.torch_memory_limit == 25 << 30
+
+
 def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
     """One group whose layers differ in head size, so their block strides differ."""
     specs = {
