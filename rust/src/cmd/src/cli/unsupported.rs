@@ -213,6 +213,17 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub renderer_num_workers: Option<Noop>,
 
+    /// Encode rendered chat prompts piece by piece and reuse the token ids of
+    /// pieces seen in earlier requests. The token ids are identical to a full
+    /// encode.
+    #[arg(
+        long,
+        visible_alias = "no-enable-incremental-chat-tokenization",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_incremental_chat_tokenization: Option<Noop>,
+
     /// Path to a dynamically reasoning parser plugin that can be dynamically
     /// loaded and registered.
     #[arg(long)]

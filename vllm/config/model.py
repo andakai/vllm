@@ -442,6 +442,12 @@ class ModelConfig:
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
+    enable_incremental_chat_tokenization: bool = False
+    """Encode rendered chat prompts piece by piece, cutting before added
+    tokens such as `<|im_start|>`, and reuse the token ids of pieces seen in
+    earlier requests. A multi-turn conversation then encodes only its new
+    turns instead of the whole history. The token ids are identical to a full
+    encode. Needs a fast Hugging Face tokenizer."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -523,6 +529,7 @@ class ModelConfig:
             "skip_mm_profiling",
             "mm_ipc_gpu_memory_gb",
             "checkpoint_prepare_on_startup",
+            "enable_incremental_chat_tokenization",
         }
 
         factors = get_compile_factors(self, ignored_factors)

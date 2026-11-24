@@ -58,13 +58,19 @@ from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
+from .chat_encode_cache import ChatEncodeCache
 from .inputs.preprocess import parse_dec_only_prompt
 
 if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TextPrompt,
+        TokensPrompt,
+    )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
@@ -78,7 +84,7 @@ if TYPE_CHECKING:
     )
 
     from .inputs import DictPrompt
-    from .params import ChatParams
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -252,6 +258,18 @@ def _build_mixed_prompt_embeds(
 
     return full_embeds, is_token_ids.tolist()
 
+
+_CHAT_ENCODE_CACHE_BYTES = 64 << 20
+# `apply_chat_template` encode options the cache does not reproduce.
+_ENCODE_KWARGS = frozenset(
+    (
+        "padding",
+        "truncation",
+        "max_length",
+        "return_tensors",
+        "return_assistant_tokens_mask",
+    )
+)
 
 _PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, str | None, str | None, bool], str | None]()
 """
@@ -1060,9 +1078,56 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             config.model_config.hf_config, "use_unified_vision_chunk", False
         )
 
-        self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._executor
+        self._chat_encode_cache = (
+            ChatEncodeCache.maybe_create(self.tokenizer, _CHAT_ENCODE_CACHE_BYTES)
+            if config.model_config.enable_incremental_chat_tokenization
+            else None
         )
+        self._apply_chat_template_async = make_async(
+            self._apply_chat_template, executor=self._executor
+        )
+
+    def _apply_chat_template(
+        self,
+        model_config: ModelConfig,
+        tokenizer: HfTokenizer,
+        conversation: list[ConversationMessage],
+        **kwargs,
+    ) -> str | list[int]:
+        cache = self._chat_encode_cache
+        if (
+            cache is None
+            or not kwargs.get("tokenize", True)
+            or not kwargs.keys().isdisjoint(_ENCODE_KWARGS)
+        ):
+            return safe_apply_chat_template(
+                model_config, tokenizer, conversation, **kwargs
+            )
+        kwargs["tokenize"] = False
+        prompt = safe_apply_chat_template(
+            model_config, tokenizer, conversation, **kwargs
+        )
+        assert isinstance(prompt, str)
+        return cache.encode(prompt)
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> TokensPrompt:
+        # The online server renders chat prompts to text and encodes them here.
+        cache = self._chat_encode_cache
+        kwargs = params.get_encode_kwargs()
+        if (
+            cache is None
+            or kwargs.get("add_special_tokens")
+            or self._wants_offsets(prompt, params)
+        ):
+            return super()._tokenize_prompt(prompt, params)
+        token_ids = cache.encode(prompt["prompt"])
+        max_length = kwargs.get("max_length")
+        if kwargs.get("truncation") and max_length and len(token_ids) > max_length:
+            # Leave truncation to the tokenizer.
+            return super()._tokenize_prompt(prompt, params)
+        return self._build_tokens_prompt(token_ids, prompt)
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         # Skip for mock configs
@@ -1177,7 +1242,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = safe_apply_chat_template(
+        prompt_raw = self._apply_chat_template(
             model_config,
             tokenizer,
             conversation,
