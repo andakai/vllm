@@ -13,6 +13,7 @@ pub struct PerRequestMetrics {
     pub queue_time_ms: Option<f64>,
     pub mean_itl_ms: Option<f64>,
     pub tokens_per_second: Option<f64>,
+    pub num_preemptions: Option<u64>,
     pub speculative_decoding: Option<SpeculativeDecodingMetrics>,
 }
 
@@ -34,6 +35,7 @@ impl PerRequestMetrics {
             tokens_per_second: inference
                 .filter(|seconds| *seconds > 0.0)
                 .map(|seconds| num_generation_tokens as f64 / seconds),
+            num_preemptions: (times.scheduled_ts > 0.0).then_some(times.num_preemptions),
             speculative_decoding: None,
         }
     }
@@ -69,6 +71,7 @@ pub struct StreamPerRequestMetrics {
     pub queue_time_ms: Option<f64>,
     pub mean_itl_ms: Option<f64>,
     pub tokens_per_second: Option<f64>,
+    pub num_preemptions: Option<u64>,
     pub speculative_decoding: Option<StreamingSpeculativeDecodingMetrics>,
 }
 
@@ -80,6 +83,7 @@ impl From<PerRequestMetrics> for StreamPerRequestMetrics {
             queue_time_ms,
             mean_itl_ms,
             tokens_per_second,
+            num_preemptions,
             speculative_decoding,
         } = metrics;
         Self {
@@ -88,6 +92,7 @@ impl From<PerRequestMetrics> for StreamPerRequestMetrics {
             queue_time_ms,
             mean_itl_ms,
             tokens_per_second,
+            num_preemptions,
             speculative_decoding: speculative_decoding.map(Into::into),
         }
     }
@@ -191,6 +196,7 @@ mod tests {
             scheduled_ts: 10.2,
             first_token_ts: 10.5,
             last_token_ts: 11.0,
+            num_preemptions: 0,
         };
         let metrics = PerRequestMetrics::from_timestamps(times, 6);
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
@@ -208,6 +214,7 @@ mod tests {
         assert_eq!(missing.queue_time_ms, None);
         assert_eq!(missing.mean_itl_ms, None);
         assert_eq!(missing.tokens_per_second, None);
+        assert_eq!(missing.num_preemptions, None);
         assert_eq!(missing.speculative_decoding, None);
     }
 
@@ -219,13 +226,15 @@ mod tests {
                 scheduled_ts: 10.2,
                 first_token_ts: 10.5,
                 last_token_ts: 10.5,
+                num_preemptions: 0,
             },
             1,
         );
         let value = serde_json::to_value(StreamPerRequestMetrics::from(metrics)).unwrap();
         let metrics = value.as_object().unwrap();
-        assert_eq!(metrics.len(), 4);
+        assert_eq!(metrics.len(), 5);
         assert!(metrics.contains_key("time_to_first_token_ms"));
+        assert_eq!(metrics["num_preemptions"], 0);
         assert!(metrics.contains_key("generation_time_ms"));
         assert!(metrics.contains_key("queue_time_ms"));
         assert!(metrics.contains_key("tokens_per_second"));

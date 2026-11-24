@@ -49,6 +49,7 @@ def build_per_request_timing_metrics(
     `tokens_per_second` is overall output throughput: all generated tokens
     over the inference interval (scheduling to last output token), so it counts
     the prefill/TTFT phase and is not simply the reciprocal of `mean_itl_ms`.
+    `num_preemptions` counts how often the scheduler preempted the request.
     Each field is left `None` when the timestamps it depends on are
     unavailable.
     """
@@ -65,6 +66,10 @@ def build_per_request_timing_metrics(
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    num_preemptions: int | None = None
+
+    if scheduled_ts > 0:
+        num_preemptions = metrics.num_preemptions
 
     if scheduled_ts > 0 and first_token_ts > 0:
         time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
@@ -90,6 +95,7 @@ def build_per_request_timing_metrics(
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
+        num_preemptions=num_preemptions,
     )
 
 
