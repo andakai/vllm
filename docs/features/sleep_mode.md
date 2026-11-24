@@ -156,6 +156,8 @@ llm.release_kv_cache_memory()
 llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
 ```
 
+With the extensible KV cache (the default on CUDA and ROCm), vLLM caps how much memory PyTorch's caching allocator may reserve in each worker, to keep the KV cache's share free. While the KV cache sleeps, by a sleep at level 1 or 2 or by `release_kv_cache_memory()`, that cap is lifted, so a trainer in the same process (for example one that drives `LLM` directly) can use the freed memory. Waking the KV cache restores it; free that memory first, for example with `torch.cuda.empty_cache()`.
+
 #### Keep the KV connector cache
 
 Discarding the KV cache, by a sleep at level 1 or 2 or by `release_kv_cache_memory()`, also resets a configured KV connector's cache, such as blocks offloaded to CPU or kept in an external store. Pass `reset_connector=False` to keep it, so that requests after the wake-up load those blocks instead of recomputing them:

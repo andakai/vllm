@@ -121,6 +121,8 @@ class ExtensibleKVCache:
         # Bytes torch's caching allocator may reserve, set once the cache is
         # sized; None leaves it unlimited.
         self.torch_memory_limit: int | None = None
+        # The limit lifted while the physical memory is released.
+        self._released_torch_memory_limit: int | None = None
         self.buffer = ExtensibleTensor(
             self.size,
             device=device,
@@ -365,14 +367,23 @@ class ExtensibleKVCache:
         return committed
 
     def release_physical(self) -> None:
-        """Drop physical pages for sleep; addresses and views stay valid."""
+        """Drop physical pages for sleep; addresses and views stay valid.
+        Torch's memory cap is lifted until recommit(), so that other
+        allocations in the process, such as a colocated trainer's, can use
+        the freed memory."""
         self.buffer.release_physical()
+        if self.torch_memory_limit is not None:
+            self._released_torch_memory_limit = self.torch_memory_limit
+            self.set_torch_memory_limit(None)
 
     def recommit(self) -> None:
         """Map fresh zeroed pages for the blocks committed before release."""
         num_blocks = self.num_committed_blocks
         self.num_committed_blocks = 0
         self.commit(num_blocks)
+        if self._released_torch_memory_limit is not None:
+            self.set_torch_memory_limit(self._released_torch_memory_limit)
+            self._released_torch_memory_limit = None
 
     def set_torch_memory_limit(self, num_bytes: int | None) -> None:
         """Cap what torch's caching allocator reserves on this device, or lift
