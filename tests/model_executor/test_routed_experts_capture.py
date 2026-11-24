@@ -185,7 +185,9 @@ def test_public_binding_binds_target_model_router(monkeypatch):
 
     monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
     calls = []
-    capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
+    capturer = types.SimpleNamespace(
+        capture=lambda *args: calls.append(args), keep_layers=lambda n: None
+    )
 
     bind_routed_experts_capturer(
         types.SimpleNamespace(modules=lambda: [target_module]), capturer
@@ -194,7 +196,7 @@ def test_public_binding_binds_target_model_router(monkeypatch):
     assert target_module.router.capture_fn is not None
     topk_ids = torch.tensor([[5, 6]])
     target_module.router.capture_fn(topk_ids)
-    assert calls == [(7, topk_ids)]
+    assert calls == [(0, topk_ids)]
 
 
 def test_public_binding_supports_direct_capture_source():
@@ -206,14 +208,37 @@ def test_public_binding_supports_direct_capture_source():
 
     source = DirectCaptureSource()
     calls = []
-    capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
+    capturer = types.SimpleNamespace(
+        capture=lambda *args: calls.append(args), keep_layers=lambda n: None
+    )
 
     bind_routed_experts_capturer(source, capturer)
 
     assert source.capture_fn is not None
     topk_ids = torch.tensor([[1, 2]])
     source.capture_fn(topk_ids)
-    assert calls == [(3, topk_ids)]
+    assert calls == [(0, topk_ids)]
+
+
+def test_binding_keeps_rows_for_moe_layers_only(tmp_path, monkeypatch):
+    """Dense layers get no row: MoE layers 3 and 1 of 4 take rows 1 and 0."""
+    capturer = _cpu_capturer(tmp_path, monkeypatch)
+    model = torch.nn.ModuleList([_CaptureSource(3), _CaptureSource(1)])
+    bind_routed_experts_capturer(model, capturer)
+    assert capturer.shape_per_token == (2, 2)
+
+    ids_by_layer = (
+        torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
+        torch.tensor([[5, 6], [7, 8]], dtype=torch.int32),
+    )
+    with override_forward_context(_forward_context()):
+        for source, ids in zip(model, ids_by_layer, strict=True):
+            source(ids)
+
+    snapshot = capturer.snapshot_routing_data(2)
+    assert snapshot.shape == (2, 2, 2)
+    assert snapshot[:, 0].tolist() == ids_by_layer[1].tolist()
+    assert snapshot[:, 1].tolist() == ids_by_layer[0].tolist()
 
 
 def _cpu_capturer(tmp_path, monkeypatch):
@@ -244,9 +269,9 @@ def _cpu_capturer(tmp_path, monkeypatch):
 def test_custom_restorer_writes_returned_rows(tmp_path, monkeypatch):
     """Capture writes the rows returned by the backend's single restorer."""
     capturer = _cpu_capturer(tmp_path, monkeypatch)
-    capturer.device_buffer.fill_(-1)
     source = _CaptureRestorer(0)
     bind_routed_experts_capturer(source, capturer)
+    capturer.device_buffer.fill_(-1)
 
     ids = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
     original = ids.clone()
@@ -350,21 +375,22 @@ def _bind_monolithic(
     monkeypatch.setattr(fused_moe_layer, "MoERunner", _MonolithicMoE)
     layer = _MonolithicMoE(experts)
     bind_routed_experts_capturer(
-        SimpleNamespace(modules=lambda: [layer]), SimpleNamespace(capture=capture)
+        SimpleNamespace(modules=lambda: [layer]),
+        SimpleNamespace(capture=capture, keep_layers=lambda n: None),
     )
     return layer
 
 
 def test_public_binding_gives_monolithic_layers_a_sink(monkeypatch):
     """A monolithic kernel routes internally, so binding gives the layer, which
-    outlives kernel rebuilds, a sink that captures under its layer id."""
+    outlives kernel rebuilds, a sink that captures into its layer's row."""
     calls = []
     layer = _bind_monolithic(
         monkeypatch, _ToyMonolithicExperts(), lambda *args: calls.append(args)
     )
     ids = torch.tensor([[1, 2]])
     layer.routed_experts.routing_sink.capture_fn(ids)
-    assert calls == [(_MonolithicMoE.layer_id, ids)]
+    assert calls == [(0, ids)]
 
 
 def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
@@ -432,7 +458,7 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     topk = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
     ctx = _forward_context()
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
+        capturer.capture(row=0, topk_ids=topk)
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
     assert capturer.device_buffer[3, 0, 0].item() == -1
 
@@ -579,7 +605,7 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype):
     topk = torch.tensor([[1, 2], [254, 255]], dtype=torch.int64)
     ctx = _forward_context()
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
+        capturer.capture(row=0, topk_ids=topk)
 
     output = capturer.snapshot_routing_data(2)
     assert capturer.device_buffer.dtype == torch.int32
@@ -601,7 +627,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
         [[0, 1], [2, 3], [10, 11], [12, 13], [14, 15]], dtype=torch.int32
     )
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
+        capturer.capture(row=0, topk_ids=topk)
     want = topk[2:5]
     assert torch.equal(capturer.device_buffer[:3, 0, :], want)
 
@@ -615,7 +641,7 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     )
     topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
+        capturer.capture(row=0, topk_ids=topk)
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
 
 
@@ -634,7 +660,7 @@ def test_routed_experts_capturer_dp_ep_gathered_shards():
     )
 
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
+        capturer.capture(row=0, topk_ids=topk)
 
     assert torch.equal(capturer.device_buffer[:2, 0], topk[4:])
 
@@ -658,7 +684,7 @@ def test_routed_experts_capturer_sp_modular_gathers_tp_shards(single_dp):
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
     ):
-        capturer.capture(layer_id=0, topk_ids=local_shard)
+        capturer.capture(row=0, topk_ids=local_shard)
 
     tp_group.all_gather.assert_called_once()
     gather_input = tp_group.all_gather.call_args.args[0]
@@ -744,7 +770,7 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
-        capturer.capture(layer_id=0, topk_ids=topk)
+        capturer.capture(row=0, topk_ids=topk)
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 

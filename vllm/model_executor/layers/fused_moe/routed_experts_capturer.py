@@ -79,8 +79,9 @@ class RoutedExpertsCapturer:
     that can represent every logical expert ID.
 
     Invariants:
-        - One instance per worker; shape is fixed at init and covers the
-          worst-case step (`max_num_batched_tokens` tokens).
+        - One instance per worker; shape is fixed at binding, with one row
+          per MoE layer, and covers the worst-case step
+          (`max_num_batched_tokens` tokens).
         - Every routed layer overwrites the current step's token rows.
     """
 
@@ -115,19 +116,26 @@ class RoutedExpertsCapturer:
             self._restore_local_topk_ids
         )
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
-        if not 0 <= layer_id < self.device_buffer.shape[1]:
+    def keep_layers(self, num_layers: int) -> None:
+        """Keep one row per bound MoE layer instead of one per hidden layer."""
+        if num_layers == self.shape_per_token[0]:
+            return
+        self.shape_per_token = (num_layers, self.shape_per_token[1])
+        self.device_buffer = self.device_buffer.new_zeros(
+            (self.device_buffer.shape[0], *self.shape_per_token)
+        )
+
+    def capture(self, row: int, topk_ids: torch.Tensor) -> None:
+        if not 0 <= row < self.device_buffer.shape[1]:
             raise IndexError(
-                f"routed-experts layer {layer_id} exceeds capture buffer "
+                f"routed-experts row {row} exceeds capture buffer "
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
         ctx = get_forward_context()
         local_topk_ids = self.restore_rows(topk_ids, ctx)
         offset = dbo_current_ubatch_token_offset()
-        self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
-            local_topk_ids
-        )
+        self.device_buffer[offset : offset + len(local_topk_ids), row] = local_topk_ids
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
@@ -221,19 +229,27 @@ def bind_routed_experts_capturer(
     )
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
+    modules = [
+        module
+        for module in model.modules()
+        if isinstance(module, (MoERunner, RoutedExpertsCaptureSource))
+    ]
+    # Dense layers route nothing, so rows cover only the MoE layers, in order.
+    rows = {
+        layer_id: row
+        for row, layer_id in enumerate(sorted({m.layer_id for m in modules}))
+    }
     num_bound = 0
     restorer_bound = False
-    for module in model.modules():
-        if not isinstance(module, (MoERunner, RoutedExpertsCaptureSource)):
-            continue
+    for module in modules:
         if not restorer_bound and isinstance(module, RoutedExpertsRowRestorer):
             capturer.restore_rows = module.restore_routed_experts_rows
             restorer_bound = True
+        capture_fn = partial(capturer.capture, rows[module.layer_id])
         if isinstance(module, RoutedExpertsCaptureSource):
-            module.capture_fn = partial(capturer.capture, module.layer_id)
+            module.capture_fn = capture_fn
             num_bound += 1
             continue
-        capture_fn = partial(capturer.capture, module.layer_id)
         quant_method = module._quant_method
         if quant_method.is_monolithic:
             moe_kernel = getattr(quant_method, "moe_kernel", None)
@@ -262,3 +278,4 @@ def bind_routed_experts_capturer(
 
     if num_bound == 0:
         raise ValueError("No supported MoE router found for routed-experts capture.")
+    capturer.keep_layers(len(rows))
