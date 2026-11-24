@@ -262,8 +262,9 @@ pub struct ChatCompletionRequest {
     /// tokens.
     pub return_weight_versions: Option<bool>,
 
-    /// Skip the first N prompt tokens from the returned routed-expert rows.
-    pub routed_experts_prompt_start: Option<u32>,
+    /// Skip the first N prompt tokens from the returned routed-expert rows;
+    /// -1 returns one row per output token.
+    pub routed_experts_prompt_start: Option<i64>,
 
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]

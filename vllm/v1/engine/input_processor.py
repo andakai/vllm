@@ -448,9 +448,11 @@ class InputProcessor:
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )
+            if sampling_params.routed_experts_prompt_start == -1:
+                sampling_params.routed_experts_prompt_start = prompt_len - 1
             if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
                 raise VLLMValidationError(
-                    f"routed_experts_prompt_start must be between 0 and "
+                    f"routed_experts_prompt_start must be -1 or between 0 and "
                     f"the prompt length ({prompt_len}), inclusive.",
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,

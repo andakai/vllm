@@ -179,14 +179,13 @@ pub fn lower_sampling_params(
     validate_prompt_logprob_start(prompt_logprob_start, prompt_len)?;
     validate_repetition_detection(repetition_detection.as_ref())?;
     // Python validates against the (multimodal-expanded) prompt length.
-    let routed_experts_prompt_start = routed_experts_prompt_start.unwrap_or(0);
-    if routed_experts_prompt_start > prompt_len {
-        return Err(SamplingParamsError::RoutedExpertsPromptStartOutOfRange {
-            value: routed_experts_prompt_start,
-            prompt_len,
-        }
-        .into());
-    }
+    let routed_experts_prompt_start = match routed_experts_prompt_start.unwrap_or(0) {
+        -1 => prompt_len.saturating_sub(1),
+        value => u32::try_from(value)
+            .ok()
+            .filter(|&start| start <= prompt_len)
+            .ok_or(SamplingParamsError::RoutedExpertsPromptStartOutOfRange { value, prompt_len })?,
+    };
     // Validate the final constraint against the backend that will compile it:
     // chat may have replaced the user's constraint with a parser-built output
     // grammar.
@@ -521,7 +520,7 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_validates_routed_experts_prompt_start() {
-        let lower = |start: Option<u32>| {
+        let lower = |start: Option<i64>| {
             lower_sampling_params_with_limits(
                 SamplingParams {
                     routed_experts_prompt_start: start,
@@ -531,12 +530,15 @@ mod tests {
             )
             .map(|params| params.routed_experts_prompt_start)
         };
-        // The prompt has 3 tokens; like Python, accept [0, prompt_len].
+        // The prompt has 3 tokens; like Python, accept -1 and [0, prompt_len].
         assert_eq!(lower(None).unwrap(), 0);
         assert_eq!(lower(Some(3)).unwrap(), 3);
-        let error = lower(Some(4)).unwrap_err();
-        assert!(error.is_request_validation_error());
-        assert!(error.to_string().contains("routed_experts_prompt_start"));
+        assert_eq!(lower(Some(-1)).unwrap(), 2);
+        for start in [4, -2] {
+            let error = lower(Some(start)).unwrap_err();
+            assert!(error.is_request_validation_error());
+            assert!(error.to_string().contains("routed_experts_prompt_start"));
+        }
     }
 
     #[test]
