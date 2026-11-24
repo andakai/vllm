@@ -389,6 +389,28 @@ Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
 batch detokenization — see the largest wins. If your bottleneck is GPU
 prefill/decode, the tokenizer change is unlikely to be visible end-to-end.
 
+### Incremental Chat Tokenization
+
+A multi-turn chat request re-sends the whole conversation, so by default every
+turn encodes the full history again. With
+`--enable-incremental-chat-tokenization`, vLLM cuts the rendered prompt before
+added tokens such as `<|im_start|>` and reuses the token ids of pieces seen in
+earlier requests, so a long agentic conversation encodes only its new turns:
+
+```console
+vllm serve Qwen/Qwen3-8B --enable-incremental-chat-tokenization
+```
+
+The token ids are identical to a full encode. Fast tokenizers split text on
+added tokens before normalization and pre-tokenization, so a piece that starts
+with such a token encodes the same on its own. Tokens that strip neighboring
+whitespace, match only as a single word, or are normalized are not used as cut
+points.
+
+The cache holds up to 64 MiB of segment text and token ids per API server. It
+applies to chat requests rendered by the Hugging Face renderer, and to text
+prompts encoded without special tokens, and needs a fast tokenizer.
+
 ### Parallel Processing
 
 You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
