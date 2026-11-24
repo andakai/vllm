@@ -169,12 +169,17 @@ Block hashes do not cover the weights. If the weights may change before the wake
 
 #### Free a KV connector's host memory
 
-Resetting the connector's cache does not return its host memory. A connector
-that keeps a CPU pool inside the vLLM process, such as `MooncakeStoreConnector`
-in its default `embedded` mode, holds that pool for as long as the engine runs,
-also while it sleeps. When a colocated trainer needs that memory, run the pool
-in its own process with Mooncake's `standalone-store` mode, and stop that
-process while the engine sleeps:
+When a sleep or `release_kv_cache_memory()` resets the connector, the CPU pool
+of native KV offloading (`--kv-offloading-size`) is returned to the kernel too,
+and waking the KV cache allocates and pins it again before serving resumes.
+With `reset_connector=False` the pool, and the blocks in it, are kept.
+
+Other connectors keep their host memory. A connector that keeps a CPU pool
+inside the vLLM process, such as `MooncakeStoreConnector` in its default
+`embedded` mode, holds that pool for as long as the engine runs, also while it
+sleeps. When a colocated trainer needs that memory, run the pool in its own
+process with Mooncake's `standalone-store` mode, and stop that process while
+the engine sleeps:
 
 1. Put the engine to sleep.
 2. Stop `mooncake_client`. vLLM keeps running.

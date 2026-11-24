@@ -362,6 +362,14 @@ class OffloadingConnectorWorker:
         self._connector_worker_meta = OffloadingWorkerMetadata()
         return meta
 
+    def release_host_memory(self) -> None:
+        if self.worker is not None:
+            self.worker.release_host_memory()
+
+    def restore_kv_caches(self) -> None:
+        if self.worker is not None:
+            self.worker.restore_host_memory()
+
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()

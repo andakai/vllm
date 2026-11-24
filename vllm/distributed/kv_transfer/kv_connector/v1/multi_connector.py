@@ -319,6 +319,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.restore_kv_caches()
 
+    def release_host_memory(self) -> None:
+        for c in self._connectors:
+            c.release_host_memory()
+
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:
             connector.bind_kv_cache_manager(kv_cache_manager)

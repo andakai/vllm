@@ -773,6 +773,15 @@ class OffloadingWorker(ABC):
         """Whether this worker can take transfers."""
         return True
 
+    def release_host_memory(self) -> None:
+        """Free the memory of an offload medium whose cache was reset, while
+        the KV cache sleeps. Idempotent."""
+        return
+
+    def restore_host_memory(self) -> None:
+        """Back the memory freed by release_host_memory() again. Idempotent."""
+        return
+
     def shutdown(self) -> None:
         return
 

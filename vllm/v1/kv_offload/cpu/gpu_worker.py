@@ -856,6 +856,8 @@ class CPUOffloadingWorker(OffloadingWorker):
         host_memory_is_pinned = pin_memory and (
             mmap_region is None or mmap_region.is_pinned or self._defer_host_setup
         )
+        self._host_memory_is_pinned = host_memory_is_pinned
+        self._host_released = False
 
         canonical_bytes_per_block = (
             _canonical_block_sizes(kv_caches.group_data_refs, len(kv_caches.tensors))
@@ -915,6 +917,38 @@ class CPUOffloadingWorker(OffloadingWorker):
 
     def is_ready(self) -> bool:
         return self._ready.is_set()
+
+    def release_host_memory(self) -> None:
+        region = self._mmap_region
+        if region is None or self._host_released:
+            return
+        if self._setup_thread is not None:
+            self._setup_stop.set()
+            self._setup_thread.join()
+            self._setup_thread = None
+        torch.accelerator.synchronize()
+        region.unpin()
+        region.release_pages()
+        self._host_released = True
+        logger.info(
+            "Released %.2f GB of CPU offload memory", region.total_size_bytes / 1e9
+        )
+
+    def restore_host_memory(self) -> None:
+        region = self._mmap_region
+        if region is None or not self._host_released:
+            return
+        t0 = time.monotonic()
+        for offset, length in region.prefault_ranges(self._prefault_shard):
+            region.prefault(offset, length)
+        if self._host_memory_is_pinned:
+            # Transfers were set up for pinned memory.
+            pin_mmap_region(region, worker_slot_only=self._worker_slot_only)
+            if not region.is_pinned:
+                raise RuntimeError("Pinning the CPU offload region failed on wake-up")
+        self._host_released = False
+        self._ready.set()
+        logger.info("Restored CPU offload memory in %.1f s", time.monotonic() - t0)
 
     def _host_setup(self) -> None:
         region = self._mmap_region

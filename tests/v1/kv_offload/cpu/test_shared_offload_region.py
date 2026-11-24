@@ -261,6 +261,18 @@ def iid():
 # ---------------------------------------------------------------------------
 
 
+def test_release_pages_frees_memory_for_every_mapper(iid):
+    """Pages one mapper releases leave every mapping of the region: they read
+    back as zeros, and prefault() backs them again."""
+    with _multi_region(iid, num_workers=2) as (r0, r1):
+        r0.base_tensor.fill_(7)
+        r0.release_pages()
+        assert not any(_page_residency(r1.mmap_obj, r1.total_size_bytes))
+        assert not r1.base_tensor.any()
+        r1.prefault(0, r1.total_size_bytes)
+        assert all(_page_residency(r0.mmap_obj, r0.total_size_bytes))
+
+
 def test_create_next_worker_view_shape_and_stride(iid):
     """Returned tensor must have shape (num_chunks, tensor_page_size) and
     stride (row_stride, 1) where row_stride = cpu_page_size * num_workers."""
