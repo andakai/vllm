@@ -401,6 +401,10 @@ class Worker(WorkerBase):
 
         self.synchronize_device()
 
+    def release_kv_connector_host_memory(self) -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().release_host_memory()
+
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:
             get_kv_transfer_group().unregister_kv_caches()

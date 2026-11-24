@@ -985,7 +985,8 @@ def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
     "kwargs,expected", [({}, True), (dict(reset_connector=False), False)]
 )
 def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
-    """Discarding the KV cache resets the connector unless the caller keeps it."""
+    """Discarding the KV cache resets the connector, and frees the host memory
+    behind its cache, unless the caller keeps it."""
     core = _pausable_engine_core_proc()
     core.model_executor.is_sleeping = False
     reset_calls: list[bool] = []
@@ -998,6 +999,8 @@ def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
         core.release_kv_cache_memory(**kwargs)
 
     assert reset_calls == [expected]
+    released = "release_kv_connector_host_memory" in _executor_calls(core)
+    assert released == expected
 
 
 @pytest.mark.parametrize("reset_connector", [True, False])

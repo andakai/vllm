@@ -1129,9 +1129,13 @@ class EngineCore:
             return pause_future
 
         # Level 1+: Delegate to executor for GPU memory management
-        model_executor = self.model_executor
+        def sleep_executor() -> None:
+            self.model_executor.sleep(level)
+            if reset_connector:
+                self._release_connector_host_memory()
+
         if pause_future is None:
-            model_executor.sleep(level)
+            sleep_executor()
             return None
 
         future = Future[Any]()
@@ -1139,7 +1143,8 @@ class EngineCore:
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                sleep_executor()
+                future.set_result(None)
             except Exception as e:
                 future.set_exception(e)
 
@@ -1197,6 +1202,14 @@ class EngineCore:
             )
         self._reset_caches(reset_connector=reset_connector)
         self.model_executor.discard(("kv_cache",))
+        if reset_connector:
+            self._release_connector_host_memory()
+
+    def _release_connector_host_memory(self) -> None:
+        # The connector's cache was reset, so the host memory behind it is free
+        # to return until the KV cache wakes up.
+        if self.scheduler.get_kv_connector() is not None:
+            self.collective_rpc("release_kv_connector_host_memory")
 
     def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
         return self._checkpoint_state, self._checkpoint_error

@@ -112,6 +112,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def release_host_memory(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.release_host_memory()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
+
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         assert self.connector_worker is not None
         assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)

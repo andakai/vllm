@@ -352,6 +352,12 @@ class KVConnectorBase_V1(ABC):
         """Redo `unregister_kv_caches` after wake-up. Idempotent."""
         return
 
+    def release_host_memory(self) -> None:
+        """Free host memory that held the cache `reset_cache` emptied. Called
+        after `unregister_kv_caches` when a sleep or KV cache release resets
+        the connector; `restore_kv_caches` backs it again. Idempotent."""
+        return
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)

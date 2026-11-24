@@ -27,6 +27,7 @@ logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+_MADV_REMOVE = getattr(mmap, "MADV_REMOVE", 9)
 _MAP_FIXED = 0x10
 # Page-cache inserts are serialized per shm file, capping pre-faulting of one
 # file near 10 GiB/s; smaller segments are not worth a file.
@@ -513,7 +514,7 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
-    def cleanup(self) -> None:
+    def unpin(self) -> None:
         if self.is_pinned and self._base is not None:
             base_ptr = self._base.data_ptr()
             addresses = self.pinned_addresses or [base_ptr]
@@ -521,6 +522,20 @@ class SharedOffloadRegion:
                 host_unregister(address)
             self.pinned_addresses.clear()
             self.is_pinned = False
+
+    def release_pages(self) -> None:
+        """Return the region's memory to the kernel, for every process mapping
+        it. The mapping stays valid; prefault() backs it again. Unpin first:
+        pinned pages stay allocated."""
+        assert not self.is_pinned
+        if _libc_madvise()(
+            self.base_tensor.data_ptr(), self.total_size_bytes, _MADV_REMOVE
+        ):
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+
+    def cleanup(self) -> None:
+        self.unpin()
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts
         # drop so the storage (which holds the mmap_obj buffer export) is freed
