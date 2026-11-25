@@ -108,8 +108,11 @@ pub fn prompt_logprobs_to_maps(
     prompt_token_ids: &[u32],
 ) -> Result<PromptLogprobs, ApiError> {
     if let Some(prompt_logprobs) = prompt_logprobs {
-        return Ok(std::iter::once(None)
-            .chain(prompt_logprobs.scored_positions.iter().map(|position| {
+        // The first token, and those up to `prompt_logprob_start`, are unscored.
+        let scored = &prompt_logprobs.scored_positions;
+        let num_unscored = prompt_token_ids.len().saturating_sub(scored.len()).max(1);
+        return Ok(std::iter::repeat_n(None, num_unscored)
+            .chain(scored.iter().map(|position| {
                 Some(
                     position
                         .entries
@@ -338,6 +341,21 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn prompt_logprobs_maps_pad_positions_before_prompt_logprob_start() {
+        // A 4-token prompt with prompt_logprob_start=2 scores only token 3.
+        let prompt_logprobs = vllm_text::DecodedPromptLogprobs {
+            first_token_id: 10,
+            first_token: "first".to_string(),
+            scored_positions: sample_logprobs().positions,
+        };
+
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 11, 12, 1]).unwrap();
+        assert_eq!(maps.len(), 4);
+        assert!(maps[..3].iter().all(Option::is_none));
+        assert!(maps[3].as_ref().unwrap().contains_key(&1));
     }
 
     #[test]

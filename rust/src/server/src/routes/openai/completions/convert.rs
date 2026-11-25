@@ -140,7 +140,7 @@ pub(super) fn prepare_completion_request(
             logprobs,
             prompt_logprobs,
             prompt_logprob_token_ids: None,
-            prompt_logprob_start: None,
+            prompt_logprob_start: request.prompt_logprob_start,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -693,6 +693,29 @@ mod tests {
             prepared.text_request().sampling_params.prompt_logprobs,
             Some(3)
         );
+    }
+
+    #[test]
+    fn prepare_completion_request_forwards_prompt_logprob_start() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "prompt_logprobs": 0,
+            "prompt_logprob_start": 4
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_processor(),
+        )
+        .expect("prepare");
+
+        let params = &prepared.text_request().sampling_params;
+        assert_eq!(params.prompt_logprobs, Some(0));
+        assert_eq!(params.prompt_logprob_start, Some(4));
     }
 
     #[test]

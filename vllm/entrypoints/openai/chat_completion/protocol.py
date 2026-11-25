@@ -309,6 +309,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     prompt_logprobs: int | None = None
+    prompt_logprob_start: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Compute prompt_logprobs only for the prompt tokens after this "
+            "0-based position; tokens 0..prompt_logprob_start come back as null. "
+            "Requires prompt_logprobs and must be below the prompt length - 1."
+        ),
+    )
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -808,6 +817,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else None
             ),
             prompt_logprobs=prompt_logprobs,
+            prompt_logprob_start=self.prompt_logprob_start,
             logprob_token_ids=self.logprob_token_ids or None,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,

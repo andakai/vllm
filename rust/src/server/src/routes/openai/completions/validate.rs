@@ -31,6 +31,13 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    if request.echo && request.prompt_logprob_start.is_some() {
+        bail_invalid_request!(
+            param = "prompt_logprob_start",
+            "prompt_logprob_start is not supported with echo=true."
+        );
+    }
+
     if request.suffix.is_some() {
         bail_invalid_request!(param = "suffix", "suffix is not supported.");
     }

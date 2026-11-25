@@ -99,6 +99,15 @@ class CompletionRequest(OpenAIBaseModel):
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    prompt_logprob_start: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Compute prompt_logprobs only for the prompt tokens after this "
+            "0-based position; tokens 0..prompt_logprob_start come back as null. "
+            "Requires prompt_logprobs and must be below the prompt length - 1."
+        ),
+    )
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -421,6 +430,7 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
+            prompt_logprob_start=self.prompt_logprob_start,
             logprob_token_ids=self.logprob_token_ids or None,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
@@ -575,6 +585,11 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter=field_name,
                     value=field_value,
                 )
+        if data.get("echo") and data.get("prompt_logprob_start") is not None:
+            raise VLLMValidationError(
+                "prompt_logprob_start is not supported with echo=true.",
+                parameter="prompt_logprob_start",
+            )
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(

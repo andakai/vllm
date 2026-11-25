@@ -310,6 +310,38 @@ async def test_prompt_logprobs_completion(
 
 
 @pytest.mark.asyncio
+async def test_prompt_logprob_start_completion(client: openai.AsyncOpenAI):
+    prompt = "A robot may not injure another robot"
+    full = await client.completions.create(
+        model=MODEL_NAME, prompt=prompt, max_tokens=1, extra_body={"prompt_logprobs": 0}
+    )
+    part = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=1,
+        extra_body={"prompt_logprobs": 0, "prompt_logprob_start": 3},
+    )
+    with pytest.raises(BadRequestError, match="echo"):
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=prompt,
+            max_tokens=1,
+            echo=True,
+            logprobs=0,
+            extra_body={"prompt_logprob_start": 3},
+        )
+    rows, part_rows = full.choices[0].prompt_logprobs, part.choices[0].prompt_logprobs
+    assert len(part_rows) == len(rows)
+    assert part_rows[:4] == [None] * 4
+    for row, part_row in zip(rows[4:], part_rows[4:]):
+        assert part_row.keys() == row.keys()
+        for token_id, logprob in row.items():
+            assert part_row[token_id]["logprob"] == pytest.approx(
+                logprob["logprob"], abs=0.05
+            )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
