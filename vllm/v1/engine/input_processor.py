@@ -178,6 +178,15 @@ class InputProcessor:
                     vocab_size=self.model_config.get_vocab_size(),
                 )
 
+            if (
+                params.logprobs_mode is not None
+                and self.model_config.logprobs_mode.endswith("_logits")
+            ):
+                raise ValueError(
+                    "logprobs_mode cannot be set per request when the engine "
+                    "returns logits (--logprobs-mode "
+                    f"{self.model_config.logprobs_mode})"
+                )
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
                     raise ValueError(

@@ -112,6 +112,15 @@ class CompletionRequest(OpenAIBaseModel):
             "set."
         ),
     )
+    logprobs_mode: Literal["raw_logprobs", "processed_logprobs"] | None = Field(
+        default=None,
+        description=(
+            "Distribution of the returned sample logprobs, overriding the "
+            "server's `--logprobs-mode` for this request: `raw_logprobs` (the "
+            "model's) or `processed_logprobs` (after penalties, temperature "
+            "and top-k/top-p, the distribution sampled from)."
+        ),
+    )
     bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
@@ -422,6 +431,7 @@ class CompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
             logprob_token_ids=self.logprob_token_ids or None,
+            logprobs_mode=self.logprobs_mode,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,

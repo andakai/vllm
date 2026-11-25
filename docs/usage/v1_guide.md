@@ -55,6 +55,7 @@ You can adjust this behavior by setting the `--logprobs-mode` flag.
 Four modes are supported: `raw_logprobs` (default), `processed_logprobs`, `raw_logits`, `processed_logits`.
 Raw means the values before applying any logit processors, like bad words.
 Processed means the values after applying all processors, including temperature and top_k/top_p.
+A request can choose between `raw_logprobs` and `processed_logprobs` for its own sample logprobs with the `logprobs_mode` sampling parameter (also accepted by `/v1/completions` and `/v1/chat/completions`), unless the server returns logits.
 
 #### Prompt Logprobs with Prefix Caching
 

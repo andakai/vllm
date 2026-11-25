@@ -11,7 +11,7 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, SerializeDisplay};
 use validator::Validate;
 use vllm_engine_core_client::protocol::multimodal::MmModality;
-use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::{LogprobsMode, RepetitionDetectionParams};
 use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
 
@@ -184,6 +184,10 @@ pub struct ChatCompletionRequest {
     /// `top_logprobs`. Requires `logprobs=true`.
     pub logprob_token_ids: Option<Vec<u32>>,
 
+    /// Distribution of the returned sample logprobs, overriding the server's
+    /// `--logprobs-mode` for this request.
+    pub logprobs_mode: Option<LogprobsMode>,
+
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
@@ -340,6 +344,7 @@ impl Default for ChatCompletionRequest {
             truncation_side: None,
             prompt_logprobs: None,
             logprob_token_ids: None,
+            logprobs_mode: None,
             allowed_token_ids: None,
             bad_words: None,
             echo: false,

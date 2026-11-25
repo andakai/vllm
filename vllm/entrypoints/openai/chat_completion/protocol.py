@@ -321,6 +321,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "top-k selected by `top_logprobs`. Requires `logprobs=True`."
         ),
     )
+    logprobs_mode: Literal["raw_logprobs", "processed_logprobs"] | None = Field(
+        default=None,
+        description=(
+            "Distribution of the returned sample logprobs, overriding the "
+            "server's `--logprobs-mode` for this request: `raw_logprobs` (the "
+            "model's) or `processed_logprobs` (after penalties, temperature "
+            "and top-k/top-p, the distribution sampled from)."
+        ),
+    )
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
@@ -809,6 +818,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ),
             prompt_logprobs=prompt_logprobs,
             logprob_token_ids=self.logprob_token_ids or None,
+            logprobs_mode=self.logprobs_mode,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,

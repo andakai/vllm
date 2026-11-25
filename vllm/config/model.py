@@ -316,6 +316,8 @@ class ModelConfig:
     temperature and top_k/top_p.
     Note: for prompt_logprobs, processed_* and raw_* yield identical results
     because prompt tokens do not go through sampling processors.
+    With a logprobs mode, a request's `logprobs_mode` sampling parameter
+    overrides it for that request's sample logprobs.
     """
     use_fp64_gumbel: bool = False
     """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
