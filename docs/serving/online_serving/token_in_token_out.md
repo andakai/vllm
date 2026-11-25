@@ -61,6 +61,8 @@ The request field `output_mode` selects how much of the postprocessing the serve
 | `text` | `text` on every choice and decoded tokens with `bytes` in `logprobs` | a tokenizer |
 | `derender` | the parsed assistant `message` (`content`, `reasoning`, `tool_calls`) on every choice, plus `logprobs` shaped like coupled chat's | a tokenizer and the parser flags you'd give `vllm serve` |
 
+At `tokens`, the server decodes the output only to match `stop` strings (and decodes prompt logprobs when they are requested), so a request without them costs the API server no detokenization.
+
 `text` returns text and token IDs in a single call, without a separate [derender](derenderer.md) hop per chunk. This suits latency sensitive streaming, where the derender hop lands on every output token.
 
 Every response and every stream chunk echoes `output_mode`. Servers that predate the field ignore it and return token IDs only with a 200, so check that the `output_mode` in the response matches the one you sent. Older servers don't return it.

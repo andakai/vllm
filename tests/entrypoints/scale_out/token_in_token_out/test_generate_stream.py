@@ -1415,6 +1415,41 @@ async def test_non_stream_text_mode_returns_text_and_token_ids():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_mode", "sampling_params", "detokenize"),
+    [
+        ("tokens", SamplingParams(max_tokens=10), False),
+        ("tokens", SamplingParams(max_tokens=10, stop=["\n"]), True),
+        ("tokens", SamplingParams(max_tokens=10, prompt_logprobs=1), True),
+        ("text", SamplingParams(max_tokens=10), True),
+    ],
+)
+async def test_tokens_mode_decodes_only_for_stop_strings(
+    output_mode: str, sampling_params: SamplingParams, detokenize: bool
+):
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], text="a", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    await serving.serve_tokens(
+        GenerateRequest(
+            token_ids=[1, 2, 3],
+            model=MODEL_NAME,
+            output_mode=output_mode,
+            sampling_params=sampling_params,
+        )
+    )
+
+    assert engine.generate.call_args.args[1].detokenize is detokenize
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("no_tokenizer", ["tokens_only", "skip_tokenizer_init"])
 async def test_text_mode_rejected_without_tokenizer(no_tokenizer: str):
     """The no-op detokenizer returns "", so text mode must fail instead

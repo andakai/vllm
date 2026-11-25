@@ -457,7 +457,13 @@ class ServingTokens(GenerateBaseServing):
                     param="min_tokens",
                 )
 
-        if self.force_no_detokenize:
+        if self.force_no_detokenize or (
+            request.output_mode == "tokens"
+            and not sampling_params.stop
+            and sampling_params.prompt_logprobs is None
+        ):
+            # The tokens level returns token IDs only: decode the output just
+            # to match stop strings, and keep decoded prompt logprobs.
             sampling_params.detokenize = False
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
