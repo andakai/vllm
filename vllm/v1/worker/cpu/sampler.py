@@ -581,6 +581,8 @@ class CPUSampler:
             CPUTraceReplayState(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        # Whether each request's sample logprobs come from the processed logits.
+        self.processed_logprobs = torch.zeros(max_num_reqs, dtype=torch.bool)
         self.return_sampling_mask = return_sampling_mask
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
@@ -591,6 +593,8 @@ class CPUSampler:
         for processor in self.logits_processors:
             needs_processing |= processor.add_request(req_idx, sampling_params)
         self.needs_logits_processing[req_idx] = needs_processing
+        mode = sampling_params.logprobs_mode or self.logprobs_mode
+        self.processed_logprobs[req_idx] = mode in PROCESSED_LOGPROBS_MODES
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -645,8 +649,11 @@ class CPUSampler:
 
         if logprobs_dims is not None:
             num_logprobs, max_per_req_token_ids = logprobs_dims
-            if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
+            rows = self.processed_logprobs[expanded_idx_mapping]
+            if rows.all():
                 logits = processed_logits
+            elif rows.any():
+                logits = torch.where(rows.unsqueeze(1), processed_logits, logits)
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
             logprobs_tensors = compute_topk_scores(

@@ -248,6 +248,7 @@ pub(crate) fn prepare_responses_request(
             logprob_token_ids: None,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            logprobs_mode: None,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(vllm_xargs, ec_transfer_params.as_ref()),
                 kv_transfer_params.as_ref(),

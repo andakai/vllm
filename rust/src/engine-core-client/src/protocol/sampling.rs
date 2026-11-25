@@ -54,6 +54,18 @@ impl RepetitionDetectionParams {
     }
 }
 
+/// Distribution of the returned sample logprobs, overriding the engine's
+/// `--logprobs-mode` for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogprobsMode {
+    /// The model's distribution.
+    RawLogprobs,
+    /// The distribution sampled from, after penalties, temperature and
+    /// top-k/top-p.
+    ProcessedLogprobs,
+}
+
 /// Engine-core-facing sampling parameters for text generation.
 ///
 /// This is the normalized southbound subset used by the Rust frontend when it
@@ -157,6 +169,8 @@ pub struct EngineCoreSamplingParams {
     /// cache; newly computed blocks may still populate the cache. `None`
     /// defers to engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
+    /// Per-request override of the engine's `--logprobs-mode`.
+    pub logprobs_mode: Option<LogprobsMode>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
     pub extra_args: Option<HashMap<String, serde_json::Value>>,
     /// Number of prompt tokens to skip from returned routed-expert data.
@@ -199,6 +213,7 @@ impl EngineCoreSamplingParams {
             structured_outputs: None,
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,
+            logprobs_mode: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
             stream_interval: None,

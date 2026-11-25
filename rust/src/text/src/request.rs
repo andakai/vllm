@@ -11,7 +11,7 @@ use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::{LogprobsMode, RepetitionDetectionParams};
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::{Error, Result};
@@ -148,6 +148,9 @@ pub struct SamplingParams {
     /// computed blocks may still populate the cache). `None` defers to
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
+    /// Distribution of the returned sample logprobs, overriding the engine's
+    /// `--logprobs-mode` for this request.
+    pub logprobs_mode: Option<LogprobsMode>,
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
@@ -194,6 +197,7 @@ impl Default for SamplingParams {
             logprob_token_ids: None,
             structured_outputs: None,
             skip_reading_prefix_cache: None,
+            logprobs_mode: None,
             routed_experts_prompt_start: None,
             vllm_xargs: None,
             stream_interval: None,

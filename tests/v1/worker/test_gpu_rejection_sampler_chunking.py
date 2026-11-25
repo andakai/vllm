@@ -22,6 +22,17 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 )
 
 
+def _select_logprobs_logits(logprobs_mode: str):
+    """The sampler's per-row choice, for a batch that uses `logprobs_mode`."""
+
+    def select(logits, processed_logits, *_):
+        if logprobs_mode in PROCESSED_LOGPROBS_MODES:
+            return processed_logits
+        return logits
+
+    return select
+
+
 def _make_input_batch(
     cu_num_logits_np: np.ndarray,
     idx_mapping_np: np.ndarray,
@@ -91,6 +102,7 @@ def test_chunked_scores_match_full_batch(
     rejection_sampler = _make_rejection_sampler(
         SimpleNamespace(
             logprobs_mode=logprobs_mode,
+            select_logprobs_logits=_select_logprobs_logits(logprobs_mode),
             return_sampling_mask=False,
             logprob_token_ids_state=None,
         ),
@@ -180,6 +192,7 @@ def test_logprob_token_ids_without_topk_logprobs(logprobs_mode: str):
     rejection_sampler = _make_rejection_sampler(
         SimpleNamespace(
             logprobs_mode=logprobs_mode,
+            select_logprobs_logits=_select_logprobs_logits(logprobs_mode),
             return_sampling_mask=False,
             logprob_token_ids_state=token_ids_state,
         ),
@@ -251,6 +264,7 @@ def _make_sampler_with_token_ids(
     token_ids_state.apply_staged_writes()
     sampler = SimpleNamespace(
         logprobs_mode=logprobs_mode,
+        select_logprobs_logits=_select_logprobs_logits(logprobs_mode),
         return_sampling_mask=False,
         logprob_token_ids_state=token_ids_state,
         sampling_states=SimpleNamespace(max_num_logprobs=lambda _idx: num_logprobs),
@@ -420,6 +434,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     draft_sampled = draft_sampled.flatten()
     sampler = SimpleNamespace(
         logprobs_mode="processed_logprobs",
+        select_logprobs_logits=_select_logprobs_logits("processed_logprobs"),
         return_sampling_mask=False,
         logprob_token_ids_state=None,
         sampling_states=SimpleNamespace(

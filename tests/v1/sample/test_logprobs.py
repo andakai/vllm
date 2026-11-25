@@ -714,6 +714,56 @@ def test_prompt_logprobs_mode():
     assert values["processed_logprobs"] == values["raw_logprobs"]
 
 
+@pytest.mark.parametrize("engine_mode", ["raw_logprobs", "processed_logprobs"])
+def test_request_logprobs_mode(engine_mode: LogprobsMode):
+    """A request's logprobs_mode selects the distribution of its sample
+    logprobs, also in a batch with a request using the other one."""
+    from vllm import LLM
+
+    llm = LLM(
+        "facebook/opt-125m",
+        max_logprobs=5,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.1,
+        max_model_len=32,
+        logprobs_mode=engine_mode,
+    )
+    try:
+        temperature, top_k = 0.5, 3
+        raw, processed = llm.generate(
+            ["Hello world"] * 2,
+            sampling_params=[
+                SamplingParams(
+                    temperature=temperature,
+                    top_k=top_k,
+                    seed=0,
+                    max_tokens=8,
+                    logprobs=top_k,
+                    logprobs_mode=mode,
+                )
+                for mode in ("raw_logprobs", "processed_logprobs")
+            ],
+        )
+        assert raw.outputs[0].token_ids == processed.outputs[0].token_ids
+        assert raw.outputs[0].logprobs is not None
+        assert processed.outputs[0].logprobs is not None
+        for raw_lps, processed_lps in zip(
+            raw.outputs[0].logprobs, processed.outputs[0].logprobs
+        ):
+            assert raw_lps is not None and processed_lps is not None
+            # Renormalizing the raw top-k at the temperature gives the
+            # distribution the token was sampled from.
+            scaled = torch.tensor([lp.logprob for lp in raw_lps.values()]) / temperature
+            expected = dict(zip(raw_lps, scaled.log_softmax(0).tolist()))
+            assert expected.keys() == processed_lps.keys()
+            for token_id, logprob in processed_lps.items():
+                assert logprob.logprob == pytest.approx(expected[token_id], abs=1e-3)
+    finally:
+        del llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
 class TestCorrectDecodedToken:
     """Unit tests for _correct_decoded_token method in LogprobsProcessor.
 

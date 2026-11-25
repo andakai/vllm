@@ -7,7 +7,6 @@ import numpy as np
 import torch
 
 from vllm.config import SpeculativeConfig
-from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -330,7 +329,6 @@ class RejectionSampler:
         SamplingMaskTensors | None,
     ]:
         cu_num_logits_np = input_batch.cu_num_logits_np
-        use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
         num_reqs = input_batch.num_reqs
 
         if logits.shape[0] <= max_chunk_logits:
@@ -376,7 +374,12 @@ class RejectionSampler:
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
-                processed_logits if use_processed_logits else logits[lo:hi],
+                self.sampler.select_logprobs_logits(
+                    logits[lo:hi],
+                    processed_logits,
+                    input_batch.expanded_idx_mapping[lo:hi],
+                    input_batch.idx_mapping_np[start:end],
+                ),
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
                 input_batch.expanded_idx_mapping[lo:hi],

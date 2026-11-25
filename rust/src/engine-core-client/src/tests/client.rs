@@ -4019,6 +4019,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             structured_outputs: None,
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,
+            logprobs_mode: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
             stream_interval: None,

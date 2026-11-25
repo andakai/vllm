@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import msgspec
 import numpy as np
@@ -364,6 +364,12 @@ class SamplingParams(
     prompt_logprob_token_ids; defaults to the first row. Earlier prompt
     positions get None prompt logprobs. Set skip_reading_prefix_cache=False to
     reuse local cached rows before it."""
+    logprobs_mode: Literal["raw_logprobs", "processed_logprobs"] | None = None
+    """Distribution of the returned sample logprobs, overriding the engine's
+    `--logprobs-mode` for this request: `raw_logprobs` (the model's
+    distribution) or `processed_logprobs` (after penalties, temperature,
+    top-k/top-p and other processing, i.e. the distribution sampled from).
+    Only valid when the engine returns logprobs rather than logits."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -491,6 +497,7 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        logprobs_mode: Literal["raw_logprobs", "processed_logprobs"] | None = None,
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
@@ -548,6 +555,7 @@ class SamplingParams(
             prompt_logprob_token_ids=prompt_logprob_token_ids,
             prompt_logprob_start=prompt_logprob_start,
             logprob_token_ids=logprob_token_ids,
+            logprobs_mode=logprobs_mode,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
@@ -721,6 +729,13 @@ class SamplingParams(
                 f"logprobs must be non-negative or -1, got {self.logprobs}.",
                 parameter="logprobs",
                 value=self.logprobs,
+            )
+        if self.logprobs_mode not in (None, "raw_logprobs", "processed_logprobs"):
+            raise VLLMValidationError(
+                "logprobs_mode must be raw_logprobs or processed_logprobs, got "
+                f"{self.logprobs_mode!r}.",
+                parameter="logprobs_mode",
+                value=self.logprobs_mode,
             )
         if (
             self.prompt_logprobs is not None

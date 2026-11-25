@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_with::DefaultOnNull;
 use validator::Validate;
-use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::{LogprobsMode, RepetitionDetectionParams};
 use vllm_llm::WeightVersionSpan;
 use vllm_text::{Prompt, TruncationSide};
 
@@ -199,6 +199,10 @@ pub struct CompletionRequest {
     /// position, in addition to the sampled token. Takes precedence over
     /// the top-k selected by `logprobs`. Requires `logprobs` to be set.
     pub logprob_token_ids: Option<Vec<u32>>,
+
+    /// Distribution of the returned sample logprobs, overriding the server's
+    /// `--logprobs-mode` for this request.
+    pub logprobs_mode: Option<LogprobsMode>,
 
     // -------- Extra vLLM Parameters --------
     /// Whether to add special tokens (e.g. BOS) to the prompt

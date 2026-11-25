@@ -17,6 +17,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     xpu_sample,
     xpu_sampler_supported,
 )
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
@@ -86,6 +87,8 @@ class Sampler:
         # Whether processing may leave -inf in a request's logits (filters,
         # forcing, logits processors) rather than only scale them.
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
+        # Whether each request's sample logprobs come from the processed logits.
+        self.processed_logprobs = UvaBackedTensor(max_num_reqs, dtype=torch.bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -108,9 +111,12 @@ class Sampler:
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
+        mode = sampling_params.logprobs_mode or self.logprobs_mode
+        self.processed_logprobs.np[req_idx] = mode in PROCESSED_LOGPROBS_MODES
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
+        self.processed_logprobs.copy_to_uva()
         for processor in self.logits_processors:
             processor.apply_staged_writes()
         self.thinking_budget_state.apply_staged_writes()
@@ -167,8 +173,9 @@ class Sampler:
 
         if logprobs_dims is not None:
             num_logprobs, max_per_req_token_ids = logprobs_dims
-            if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
-                logits = processed_logits
+            logits = self.select_logprobs_logits(
+                logits, processed_logits, expanded_idx_mapping, idx_mapping_np
+            )
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
             logprobs_tensors = compute_topk_scores(
@@ -219,6 +226,22 @@ class Sampler:
             sampling_mask_tensors=sampling_mask_tensors,
         )
         return sampler_output
+
+    def select_logprobs_logits(
+        self,
+        logits: torch.Tensor,
+        processed_logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> torch.Tensor:
+        """Pick, per row, the logits each request's sample logprobs use."""
+        use_processed = self.processed_logprobs.np[idx_mapping_np]
+        if use_processed.all():
+            return processed_logits
+        if not use_processed.any():
+            return logits
+        rows = self.processed_logprobs.gpu[expanded_idx_mapping]
+        return torch.where(rows.unsqueeze(1), processed_logits, logits)
 
     def apply_sampling_params(
         self,
@@ -303,7 +326,7 @@ class Sampler:
         # logprobs need to be returned for any requests.
         fused_sampler_eligible = not (
             (top_k is None and top_p is None)
-            or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
+            or (return_logprobs and np.any(self.processed_logprobs.np[idx_mapping_np]))
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
