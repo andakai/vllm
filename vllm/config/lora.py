@@ -32,6 +32,11 @@ class LoRAConfig:
 
     max_lora_rank: MaxLoRARanks = 16
     """Max LoRA rank."""
+    max_expert_lora_rank: int | None = Field(default=None, ge=1)
+    """Rank of the MoE expert LoRA slots, at most `max_lora_rank`. Defaults to
+    `max_lora_rank`. Adapters whose expert modules have a smaller rank than the
+    rest (e.g. rank divided by top-k) waste memory and compute in slots sized
+    at `max_lora_rank`; adapters with a larger expert rank are rejected."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
     fully_sharded_loras: bool = False
@@ -117,6 +122,14 @@ class LoRAConfig:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})."
+            )
+        if (
+            self.max_expert_lora_rank is not None
+            and self.max_expert_lora_rank > self.max_lora_rank
+        ):
+            raise ValueError(
+                f"max_expert_lora_rank ({self.max_expert_lora_rank}) must be <= "
+                f"max_lora_rank ({self.max_lora_rank})."
             )
         if envs.VLLM_LORA_ENABLE_DUAL_STREAM and not current_platform.is_cuda_alike():
             raise ValueError("Dual CUDA streams are only supported on CUDA platforms.")

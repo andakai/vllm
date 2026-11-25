@@ -304,6 +304,19 @@ expert adapter weights requires both `enable_mixed_moe_lora_format=True`
 on the engine and `is_3d_lora_weight=True` on the request. Otherwise, adapter
 loading raises a `ValueError` naming these settings before activation.
 
+## MoE Expert LoRA Rank
+
+Every LoRA slot is sized at `--max-lora-rank`, the MoE expert slots included, and the fused MoE LoRA kernels run at the slot rank. Adapters often give the experts a smaller rank than the attention layers, for example the attention rank divided by the number of active experts so that each token's expert update keeps the same parameter budget. Their expert weights are then zero-padded and multiplied at the full rank. `--max-expert-lora-rank` sizes the expert slots separately:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --max-expert-lora-rank 8
+```
+
+The expert slots hold `max_loras * num_layers * num_experts * rank` rows of each LoRA matrix, so they are usually most of the LoRA memory of a MoE model; the saved memory goes to the KV cache. An adapter whose expert modules have a rank above `--max-expert-lora-rank` is rejected when it is loaded. With `--fully-sharded-loras`, the expert rank must be divisible by the MoE tensor parallel size.
+
 ## LoRA model lineage in model card
 
 The new format of `--lora-modules` is mainly to support the display of parent model information in the model card. Here's an explanation of how your current response supports this:

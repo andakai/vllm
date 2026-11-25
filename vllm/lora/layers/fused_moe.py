@@ -183,9 +183,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 (
                     max_loras,
                     self._w13_a_num_experts,
-                    lora_config.max_lora_rank
+                    self._slot_rank(lora_config)
                     if not self.fully_sharded
-                    else divide(lora_config.max_lora_rank, self.tp_size),
+                    else divide(self._slot_rank(lora_config), self.tp_size),
                     self.hidden_size,
                 ),
                 dtype=lora_config.lora_dtype,
@@ -198,7 +198,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 (
                     max_loras,
                     self.local_num_experts,
-                    lora_config.max_lora_rank,
+                    self._slot_rank(lora_config),
                     self.intermediate_size_per_partition,
                 ),
                 dtype=lora_config.lora_dtype,
@@ -213,7 +213,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     max_loras,
                     self.local_num_experts,
                     self.intermediate_size_per_partition,
-                    lora_config.max_lora_rank,
+                    self._slot_rank(lora_config),
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -228,7 +228,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.hidden_size
                     if not self.fully_sharded
                     else divide(self.hidden_size, self.tp_size),
-                    lora_config.max_lora_rank,
+                    self._slot_rank(lora_config),
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -253,6 +253,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 f"all2all_backend='allgather_reducescatter', got '{all2all_backend}'."
             )
             assert not moe_config.moe_parallel_config.is_sequence_parallel
+
+    @staticmethod
+    def _slot_rank(lora_config: LoRAConfig) -> int:
+        return lora_config.max_expert_lora_rank or lora_config.max_lora_rank
 
     def _verify_ep_fs(self, lora_config: LoRAConfig):
         # EP and fully_sharded LoRA both partition along the same TP group —
@@ -508,7 +512,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
                     max_loras,
                     self.local_num_experts,
                     self.intermediate_size_per_partition * 2,
-                    lora_config.max_lora_rank,
+                    self._slot_rank(lora_config),
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -523,7 +527,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
                     self.hidden_size
                     if not self.fully_sharded
                     else divide(self.hidden_size, self.tp_size),
-                    lora_config.max_lora_rank,
+                    self._slot_rank(lora_config),
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
