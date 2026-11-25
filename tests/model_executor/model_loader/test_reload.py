@@ -74,6 +74,24 @@ def test_preserve_placement_remapping_until_checkpoint_iteration_finishes():
     assert not reload_layerwise.get_layerwise_info(layer).defer_processing
 
 
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="device buffers")
+def test_buffered_weight_does_not_keep_its_transfer_buffer():
+    """A weight buffered until its layer is processed is copied out of the
+    larger buffer it views (a received packed chunk), so the buffer can be
+    freed; the loaded value is unchanged."""
+    layer = torch.nn.Linear(2, 2, bias=False, device="cuda")
+    record_metadata_for_reloading(layer)
+    initialize_layerwise_reload(layer, defer_processing=True)
+    chunk = torch.arange(1 << 24, dtype=torch.float32, device="cuda")  # 64 MiB
+    layer.weight.weight_loader(layer.weight, chunk[4:8].view(2, 2))
+    allocated = torch.accelerator.memory_allocated()
+    del chunk
+    assert allocated - torch.accelerator.memory_allocated() == 1 << 26
+    finalize_layerwise_reload(layer, model_config=None)
+    expected = torch.arange(4, 8, dtype=torch.float32, device="cuda").view(2, 2)
+    assert torch.equal(layer.weight, expected)
+
+
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize(
     "module_name,class_name,sink_name",

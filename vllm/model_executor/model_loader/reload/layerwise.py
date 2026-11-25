@@ -216,6 +216,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         # Preserve placement remapping until checkpoint iteration finishes:
         # expert reload wrappers must survive trailing redundant mappings.
         if info.defer_processing or is_deferred_attention_layer(layer):
+            _compact_buffered_weights(bound_args)
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -238,10 +239,29 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         if info.load_numel >= info.load_numel_total:  # type: ignore[operator]
             _layerwise_process(layer, info)
             LOADING_LAYERS.discard(layer)
+        else:
+            _compact_buffered_weights(bound_args)
 
         return ret
 
     return online_process_loader
+
+
+def _compact_buffered_weights(bound_args: inspect.BoundArguments) -> None:
+    """Copy buffered tensors that view a much larger storage.
+
+    A weight received as a view into a transfer buffer (e.g. a packed NCCL
+    chunk) would keep the whole buffer alive until its layer is processed,
+    which for attention layers is the end of the update.
+    """
+    for name, value in bound_args.arguments.items():
+        if (
+            isinstance(value, torch.Tensor)
+            and value.device.type != "cpu"  # host views are mmapped checkpoints
+            and value.nbytes
+            and value.untyped_storage().nbytes() >= 2 * value.nbytes
+        ):
+            bound_args.arguments[name] = value.clone()
 
 
 def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
