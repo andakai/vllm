@@ -358,6 +358,11 @@ class Scheduler(SchedulerInterface):
                     "acceptance rates."
                 )
 
+        # New decode requests are padded to this many draft tokens so the step
+        # stays a uniform decode batch; 0 when the count varies by batch size.
+        self.padded_num_spec_tokens = (
+            self.num_spec_tokens if self.dynamic_sd_lookup is None else 0
+        )
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         if self.num_hash_lookahead_tokens:
             # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
@@ -1363,13 +1368,13 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        self.padded_num_spec_tokens > 0
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
-                        padded_num_tokens = 1 + self.num_spec_tokens
+                        padded_num_tokens = 1 + self.padded_num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
                         if (
                             num_computed_tokens
@@ -1412,7 +1417,7 @@ class Scheduler(SchedulerInterface):
                             break
                         if (
                             pad_spec_decode
-                            and num_new_tokens != 1 + self.num_spec_tokens
+                            and num_new_tokens != 1 + self.padded_num_spec_tokens
                         ):
                             # Alignment clipped the placeholder rows. The split
                             # aligns prefill chunks, but the padded tail rows are
@@ -1639,10 +1644,10 @@ class Scheduler(SchedulerInterface):
                     request, num_computed_tokens, num_new_tokens
                 )
                 if pad_spec_decode:
-                    assert num_new_tokens == 1 + self.num_spec_tokens
+                    assert num_new_tokens == 1 + self.padded_num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
-                    ] * self.num_spec_tokens
+                    ] * self.padded_num_spec_tokens
                 # Track requests still prefilling after this chunk. A promoted load
                 # also stays tracked until _update_after_schedule drops it.
                 if (
@@ -3348,13 +3353,23 @@ class Scheduler(SchedulerInterface):
         step on, 0 to stop drafting; None restores the configured count."""
         if num_speculative_tokens is None:
             self.dynamic_sd_lookup = self.configured_sd_lookup
+            if self.configured_sd_lookup is None:
+                self.padded_num_spec_tokens = self.num_spec_tokens
             return
         if self.num_sampled_tokens_per_step == 0:
             raise ValueError("Diffusion models draft a fixed number of tokens.")
-        if not 0 <= num_speculative_tokens <= self.num_spec_tokens:
+        speculative_config = self.vllm_config.speculative_config
+        assert speculative_config is not None
+        # CUDA graphs are captured only for these counts.
+        allowed = {
+            self.num_spec_tokens,
+            *(speculative_config.runtime_num_speculative_tokens or ()),
+        }
+        if num_speculative_tokens not in allowed:
             raise ValueError(
-                f"num_speculative_tokens must be in [0, {self.num_spec_tokens}], "
-                f"got {num_speculative_tokens}."
+                f"num_speculative_tokens must be one of {sorted(allowed)}, got "
+                f"{num_speculative_tokens}; list the counts to switch to in "
+                "speculative_config runtime_num_speculative_tokens."
             )
         # The dynamic schedule path already lets each step draft fewer tokens
         # than the configured count; a cap is a schedule with smaller entries.
@@ -3362,6 +3377,8 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.max_num_seqs + 1
         )
         self.dynamic_sd_lookup = [min(k, num_speculative_tokens) for k in lookup]
+        if self.configured_sd_lookup is None:
+            self.padded_num_spec_tokens = num_speculative_tokens
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

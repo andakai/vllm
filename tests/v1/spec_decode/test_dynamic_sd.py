@@ -5,6 +5,7 @@
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.structured_output import StructuredOutputManager
@@ -191,7 +192,7 @@ def test_scheduler_falls_back_to_static_k_when_dsd_not_configured():
     ("schedule", "configured_k"), [(None, 3), ([(1, 2, 3), (3, 16, 1)], 1)]
 )
 def test_scheduler_caps_draft_tokens_at_runtime(schedule, configured_k):
-    def num_spec_tokens(*caps: int | None) -> int:
+    def schedule_with(*caps: int | None) -> SchedulerOutput:
         if schedule is None:
             scheduler = create_scheduler(
                 max_num_seqs=4, max_num_batched_tokens=40, num_speculative_tokens=3
@@ -200,15 +201,18 @@ def test_scheduler_caps_draft_tokens_at_runtime(schedule, configured_k):
             scheduler = _make_scheduler_with_dynamic_sd(
                 schedule, max_num_seqs=4, max_num_batched_tokens=40
             )
+        speculative_config = scheduler.vllm_config.speculative_config
+        assert speculative_config is not None
+        speculative_config.runtime_num_speculative_tokens = [0, 2]
         for cap in caps:
             scheduler.set_num_speculative_tokens(cap)
-        return _add_requests_and_schedule(scheduler, 4).num_spec_tokens_to_schedule
+        return _add_requests_and_schedule(scheduler, 4)
 
-    assert num_spec_tokens(0) == 0
-    assert num_spec_tokens(2) == min(2, configured_k)
-    assert num_spec_tokens(0, None) == configured_k
-    with pytest.raises(ValueError, match=r"\[0, 3\]"):
-        num_spec_tokens(4)
+    assert schedule_with(0).num_spec_tokens_to_schedule == 0
+    assert schedule_with(2).num_spec_tokens_to_schedule == min(2, configured_k)
+    assert schedule_with(0, None).num_spec_tokens_to_schedule == configured_k
+    with pytest.raises(ValueError, match=r"one of \[0, 2, 3\]"):
+        schedule_with(1)
 
 
 @pytest.mark.parametrize(

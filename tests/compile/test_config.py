@@ -774,6 +774,7 @@ def _mock_config_for_cudagraph_sizes(
             num_speculative_tokens=num_speculative_tokens,
             num_speculative_tokens_per_batch_size=schedule,
             uses_dynamic_speculative_decoding=lambda: schedule is not None,
+            runtime_num_speculative_tokens=None,
             use_multi_module_mtp=lambda: False,
             use_gemma4_mtp=lambda: False,
             enable_adaptive_verification=False,
@@ -1511,6 +1512,36 @@ def test_dynamic_decode_capture_clamps_configured_width():
 
     assert _widest_covered_request_count(compilation_config, 4, 16) == 16
     assert config.get_decode_cudagraph_query_lens(4) == {4: 16}
+
+
+@pytest.mark.usefixtures("off_sm100")
+@pytest.mark.parametrize(
+    ("schedule", "expected"),
+    [
+        (None, {1: 16, 2: 16, 4: 16}),
+        ([(1, 8, 3), (9, 16, 2)], {1: 16, 2: 16, 3: 16, 4: 8}),
+    ],
+)
+def test_runtime_draft_counts_capture_every_batch_size(schedule, expected):
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=16,
+        num_speculative_tokens=3,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=schedule,
+    )
+    config.speculative_config.runtime_num_speculative_tokens = [0, 1]
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    assert config.get_decode_cudagraph_query_lens(4) == expected
+    for query_len, max_reqs in expected.items():
+        assert (
+            _widest_covered_request_count(compilation_config, query_len, 16) >= max_reqs
+        )
 
 
 @pytest.mark.usefixtures("off_sm100")

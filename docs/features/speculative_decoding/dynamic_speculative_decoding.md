@@ -71,15 +71,24 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ## Changing K at runtime
 
-A server or `LLM` started with speculative decoding can lower its draft count without a restart, for example to stop drafting in an RL run once the policy has moved away from the drafter, and resume after a draft weight update. The count is a cap on top of `num_speculative_tokens` and of the batch-size schedule above. It applies from the next scheduling step and lasts until it is changed again:
+A server or `LLM` started with speculative decoding can lower its draft count without a restart, for example to stop drafting in an RL run once the policy has moved away from the drafter, and resume after a draft weight update. List the counts to switch to in `runtime_num_speculative_tokens` at startup; CUDA graphs are captured for each of them at every batch size, so a step at a listed count runs as fast as an engine started with it:
+
+```bash
+--speculative-config '{
+    "method": "eagle3",
+    "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "num_speculative_tokens": 3,
+    "runtime_num_speculative_tokens": [0, 1]
+  }'
+```
 
 ```python
 llm.set_num_speculative_tokens(0)     # stop drafting
-llm.set_num_speculative_tokens(1)     # at most 1 draft token per step
-llm.set_num_speculative_tokens(None)  # back to the configured count
+llm.set_num_speculative_tokens(1)     # 1 draft token per step
+llm.set_num_speculative_tokens(None)  # back to num_speculative_tokens
 ```
 
-With `VLLM_SERVER_DEV_MODE=1`, `POST /set_num_speculative_tokens` with `{"num_speculative_tokens": 0}` does the same (`null` restores the configured count); a count outside `[0, num_speculative_tokens]` returns HTTP 400. With K=0 the drafter still processes the new tokens of each step, so its KV cache stays current and drafting resumes with no stale context. CUDA graphs are captured only for the configured count (and for the counts in a batch-size schedule), so a step at another count runs with piecewise graphs.
+With `VLLM_SERVER_DEV_MODE=1`, `POST /set_num_speculative_tokens` with `{"num_speculative_tokens": 0}` does the same (`null` restores the configured count); a count that is neither `num_speculative_tokens` nor listed returns HTTP 400. The count applies from the next scheduling step until it is changed again. With a batch-size schedule, it caps the schedule's count. With K=0 the drafter still processes the new tokens of each step, so its KV cache stays current and drafting resumes with no stale context.
 
 ## Limitations
 

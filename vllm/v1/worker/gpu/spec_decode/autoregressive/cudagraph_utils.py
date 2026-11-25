@@ -61,16 +61,25 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         if specialize_spec_tokens:
             speculative_config = self.vllm_config.speculative_config
             assert speculative_config is not None
-            dense_schedule = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
-                vllm_max_batch_size=self.max_num_reqs,
-                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
-            )
+            num_speculative_tokens = self.vllm_config.num_speculative_tokens
+            # The counts steps can draft: the batch-size schedule's, or the
+            # configured one, plus those the engine can switch to at runtime.
+            if speculative_config.uses_dynamic_speculative_decoding():
+                counts = set(
+                    build_dynamic_sd_schedule_lookup(
+                        speculative_config.num_speculative_tokens_per_batch_size,
+                        vllm_max_batch_size=self.max_num_reqs,
+                        vllm_num_speculative_tokens=num_speculative_tokens,
+                    )
+                )
+            else:
+                counts = {num_speculative_tokens}
+            counts.update(speculative_config.runtime_num_speculative_tokens or ())
             self._capture_descs = {
                 mode: [
                     SpeculatorBatchDescriptor(**vars(desc), num_speculative_tokens=k)
                     for desc in descs
-                    for k in sorted(set(dense_schedule) - {0, 1}, reverse=True)
+                    for k in sorted(counts - {0, 1}, reverse=True)
                 ]
                 for mode, descs in self._capture_descs.items()
             }

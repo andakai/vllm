@@ -620,6 +620,11 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    runtime_num_speculative_tokens: list[int] | None = None
+    """Draft counts below `num_speculative_tokens` that `set_num_speculative_tokens`
+    can switch the engine to at runtime, 0 to stop drafting. CUDA graphs are
+    captured for each count, which adds to startup time and graph memory."""
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -795,6 +800,7 @@ class SpeculativeConfig:
             "target_model_config",
             "target_parallel_config",
             "num_speculative_tokens_per_batch_size",
+            "runtime_num_speculative_tokens",
             "draft_parallel_config",
             "suffix_decoding_max_tree_depth",
             "suffix_decoding_max_cached_requests",
@@ -2012,6 +2018,16 @@ class SpeculativeConfig:
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
             )
+
+        if self.runtime_num_speculative_tokens is not None:
+            counts = sorted(set(self.runtime_num_speculative_tokens))
+            if not all(0 <= k < self.num_speculative_tokens for k in counts):
+                raise ValueError(
+                    "runtime_num_speculative_tokens must be in "
+                    f"[0, num_speculative_tokens={self.num_speculative_tokens}), "
+                    f"got {self.runtime_num_speculative_tokens}."
+                )
+            self.runtime_num_speculative_tokens = counts
 
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates
