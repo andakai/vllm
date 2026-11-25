@@ -36,6 +36,7 @@ use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
+use crate::routes::inference::generate::flat_prompt_logprobs_of;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
@@ -242,6 +243,7 @@ async fn collect_completion(
         prompt_only,
         requested_logprobs,
         include_prompt_logprobs,
+        flat_prompt_logprobs,
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,
@@ -278,7 +280,19 @@ async fn collect_completion(
     } else {
         None
     };
-    let prompt_logprobs = if include_prompt_logprobs {
+    let prompt_logprobs_flat = if flat_prompt_logprobs {
+        let scored = collected
+            .prompt_logprobs
+            .as_ref()
+            .map_or(&[][..], |logprobs| &logprobs.scored_positions[..]);
+        Some(flat_prompt_logprobs_of(
+            scored,
+            collected.prompt_token_ids.len(),
+        )?)
+    } else {
+        None
+    };
+    let prompt_logprobs = if include_prompt_logprobs && !flat_prompt_logprobs {
         Some(prompt_logprobs_to_maps(
             collected.prompt_logprobs.as_ref(),
             collected.prompt_token_ids.as_ref(),
@@ -336,6 +350,7 @@ async fn collect_completion(
             finish_reason: Some(finish_reason),
             stop_reason,
             prompt_logprobs,
+            prompt_logprobs_flat,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
             routed_experts: collected.routed_experts.as_ref().map(npy_base64).transpose()?,
@@ -375,6 +390,7 @@ async fn completion_chunk_stream(
         requested_logprobs,
         // Ignored: streaming prompt logprobs are rejected for Python parity.
         include_prompt_logprobs: _,
+        flat_prompt_logprobs: _,
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,

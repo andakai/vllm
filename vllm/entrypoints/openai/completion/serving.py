@@ -23,6 +23,7 @@ from vllm.entrypoints.generate.base.serving import (
     clamp_prompt_logprobs,
     completion_top_logprobs_limit,
     format_token_id_placeholder,
+    prompt_logprobs_fields,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -225,6 +226,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if (
+                    request.prompt_logprobs_format == "flat"
+                    and sampling_params.prompt_logprobs is not None
+                ):
+                    sampling_params.flat_logprobs = True
 
             request_id_item = f"{request_id}-{i}"
 
@@ -644,7 +650,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
-            prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
+            # Flat prompt logprobs are returned as engine rows, and are
+            # rejected with echo, the only other use of the clamped list.
+            prompt_logprobs = (
+                None
+                if request.prompt_logprobs_format == "flat"
+                else clamp_prompt_logprobs(final_res.prompt_logprobs)
+            )
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
@@ -706,7 +718,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     logprobs=logprobs,
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
-                    prompt_logprobs=final_res.prompt_logprobs,
+                    **prompt_logprobs_fields(
+                        final_res.prompt_logprobs, request.prompt_logprobs_format
+                    ),
                     prompt_token_ids=(
                         prompt_token_ids if request.return_token_ids else None
                     ),

@@ -25,6 +25,7 @@ from vllm.entrypoints.generate.base.serving import (
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
     format_token_id_placeholder,
+    prompt_logprobs_fields,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -65,11 +66,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
-from .logprobs_render import (
-    prompt_logprobs_fields,
-    render_json_with_fragments,
-    render_tokens_logprobs,
-)
+from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
 from .mm_features import (
     mm_hashes_from_engine_input,
     mm_kwargs_from_features,

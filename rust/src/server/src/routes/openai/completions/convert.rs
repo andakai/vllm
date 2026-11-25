@@ -9,6 +9,7 @@ use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequ
 use super::types::CompletionRequest;
 use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
+use crate::routes::inference::generate::PromptLogprobsFormat;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
@@ -55,6 +56,8 @@ pub(super) struct ResponseOptions {
     pub requested_logprobs: Option<i32>,
     /// Whether the caller requested choice-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// Whether prompt logprobs go in `prompt_logprobs_flat`.
+    pub flat_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
     /// The request's `return_tokens_as_token_ids`; `None` falls back to the
@@ -100,6 +103,8 @@ pub(super) fn prepare_completion_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let include_prompt_logprobs = prompt_logprobs.is_some();
+    let flat_prompt_logprobs = include_prompt_logprobs
+        && request.prompt_logprobs_format == Some(PromptLogprobsFormat::Flat);
     let max_tokens = if prompt_only {
         Some(1)
     } else {
@@ -211,6 +216,7 @@ pub(super) fn prepare_completion_request(
             prompt_only,
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
+            flat_prompt_logprobs,
             return_token_ids,
             return_tokens_as_token_ids: request.return_tokens_as_token_ids,
             return_weight_versions: request.return_weight_versions.unwrap_or(false),

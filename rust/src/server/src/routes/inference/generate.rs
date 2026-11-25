@@ -35,9 +35,11 @@ use self::types::{
     GenerateChoiceLogProbs, GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent,
     GenerateLogprob, GenerateOutputMode, GenerateResponse, GenerateResponseChoice,
     GenerateResponseStreamChoice, GenerateStreamResponse, MmResponseInfo, PerRequestMetrics,
-    PlaceholderRangeInfo, PromptLogprobsFlat,
+    PlaceholderRangeInfo,
 };
-pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
+pub(crate) use self::types::{
+    GenerateRequest, GenerateSamplingParams, PromptLogprobsFlat, PromptLogprobsFormat,
+};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
@@ -616,7 +618,7 @@ fn raw_logprobs_to_generate(logprobs: &DecodedLogprobs) -> Result<GenerateLogPro
 
 /// The engine rows of the scored prompt positions, which end the prompt, as
 /// Python's `prompt_logprobs_fields` returns them.
-fn flat_prompt_logprobs_of(
+pub(crate) fn flat_prompt_logprobs_of(
     scored_positions: &[DecodedPositionLogprobs],
     prompt_len: usize,
 ) -> Result<PromptLogprobsFlat, ApiError> {

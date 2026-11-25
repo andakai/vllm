@@ -4,6 +4,7 @@
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
+use crate::routes::inference::generate::PromptLogprobsFormat;
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
@@ -46,6 +47,13 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(
             param = "logprobs",
             "`logprobs` must be a non-negative value or -1."
+        );
+    }
+
+    if request.echo && request.prompt_logprobs_format == Some(PromptLogprobsFormat::Flat) {
+        bail_invalid_request!(
+            param = "prompt_logprobs_format",
+            "`prompt_logprobs_format='flat'` is not supported with `echo`."
         );
     }
 
@@ -106,6 +114,7 @@ mod tests {
 
     use super::validate_request_compat;
     use crate::model_names::ServedModelNames;
+    use crate::routes::inference::generate::PromptLogprobsFormat;
     use crate::routes::openai::completions::types::CompletionRequest;
 
     fn base_request() -> CompletionRequest {
@@ -287,6 +296,20 @@ mod tests {
         };
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_flat_prompt_logprobs_with_echo() {
+        let request = CompletionRequest {
+            stream: false,
+            echo: true,
+            prompt_logprobs: Some(1),
+            prompt_logprobs_format: Some(PromptLogprobsFormat::Flat),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
     }
 

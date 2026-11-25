@@ -24,6 +24,7 @@ from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MIN,
     DeltaMessage,
     PerRequestMetrics,
+    PromptLogprobsFlat,
     StreamOptions,
     validate_cache_salt,
 )
@@ -650,23 +651,6 @@ class GenerateDerenderChoice(GenerateChoiceBase):
     logprobs: ChatCompletionLogProbs | None = None
     """Logprobs with decoded token strings and `bytes`. None when reasoning
     is hidden by `include_reasoning=false`."""
-
-
-class PromptLogprobsFlat(BaseModel):
-    """Prompt logprobs as the engine's rows, each array an `.npy` file in
-    base64. Row `i` scores prompt position `start + i`: column 0 is the prompt
-    token there and columns `1..k` are the top-k tokens, which may repeat it.
-    Values are not clamped."""
-
-    start: int
-    """The first scored prompt position."""
-    token_ids: str
-    """int32 `[rows, k + 1]`."""
-    logprobs: str
-    """float32 `[rows, k + 1]`."""
-    ranks: str
-    """int64 `[rows]`: the rank of each prompt token; column `j > 0` has rank
-    `j`."""
 
 
 class GenerateResponseBase(BaseModel):

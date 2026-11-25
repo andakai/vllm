@@ -136,6 +136,23 @@ class PerRequestMetrics(OpenAIBaseModel):
     speculative_decoding: SpeculativeDecodingMetrics | None = None
 
 
+class PromptLogprobsFlat(BaseModel):
+    """Prompt logprobs as the engine's rows, each array an `.npy` file in
+    base64. Row `i` scores prompt position `start + i`: column 0 is the prompt
+    token there and columns `1..k` are the top-k tokens, which may repeat it.
+    Values are not clamped."""
+
+    start: int
+    """The first scored prompt position."""
+    token_ids: str
+    """int32 `[rows, k + 1]`."""
+    logprobs: str
+    """float32 `[rows, k + 1]`."""
+    ranks: str
+    """int64 `[rows]`: the rank of each prompt token; column `j > 0` has rank
+    `j`."""
+
+
 class RequestResponseMetadata(BaseModel):
     request_id: str
     final_usage_info: UsageInfo | None = None

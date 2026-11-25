@@ -3,7 +3,7 @@
 import json
 from collections.abc import Awaitable
 from http import HTTPStatus
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from fastapi import Request
 
@@ -13,6 +13,7 @@ from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MAX,
     PRIORITY_MIN,
     PerRequestMetrics,
+    PromptLogprobsFlat,
     SpeculativeDecodingMetrics,
 )
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
@@ -26,9 +27,10 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob, PromptLogprobs
+from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.utils.serial_utils import numpy2base64
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -385,3 +387,25 @@ def clamp_prompt_logprobs(
             if logprob_values.logprob == float("-inf"):
                 logprob_values.logprob = -9999.0
     return prompt_logprobs
+
+
+def prompt_logprobs_fields(
+    prompt_logprobs: PromptLogprobs | None, prompt_logprobs_format: str
+) -> dict[str, Any]:
+    """`prompt_logprobs` or `prompt_logprobs_flat` of a response."""
+    if prompt_logprobs_format != "flat" or prompt_logprobs is None:
+        return {"prompt_logprobs": clamp_prompt_logprobs(prompt_logprobs)}
+    if (
+        not isinstance(prompt_logprobs, FlatLogprobs)
+        or (rows := prompt_logprobs.scored_rows()) is None
+    ):
+        raise ValueError("Prompt logprobs have no flat engine rows.")
+    start, token_ids, logprobs, ranks = rows
+    return {
+        "prompt_logprobs_flat": PromptLogprobsFlat(
+            start=start,
+            token_ids=numpy2base64(token_ids),
+            logprobs=numpy2base64(logprobs),
+            ranks=numpy2base64(ranks),
+        )
+    }

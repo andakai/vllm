@@ -192,7 +192,7 @@ pub enum PromptLogprobsFormat {
 /// position `start + i`, column 0 is the prompt token and columns `1..k` the
 /// top k; each array is a base64 `.npy` file.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct PromptLogprobsFlat {
+pub(crate) struct PromptLogprobsFlat {
     pub start: usize,
     /// int32 `[rows, k + 1]`.
     pub token_ids: String,

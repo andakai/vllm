@@ -16,6 +16,7 @@ from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     MMPayload,
     PerRequestMetrics,
+    PromptLogprobsFlat,
     StopParam,
     StreamOptions,
     resolve_return_mm_kwargs_alias,
@@ -99,6 +100,14 @@ class CompletionRequest(OpenAIBaseModel):
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    prompt_logprobs_format: Literal["dict", "flat"] = Field(
+        default="dict",
+        description=(
+            "With `prompt_logprobs`, 'flat' returns them as "
+            "`prompt_logprobs_flat`, NumPy arrays in base64, instead of one "
+            "object per position in `prompt_logprobs`."
+        ),
+    )
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -575,6 +584,11 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter=field_name,
                     value=field_value,
                 )
+        if data.get("prompt_logprobs_format") == "flat" and data.get("echo"):
+            raise VLLMValidationError(
+                "`prompt_logprobs_format='flat'` is not supported with `echo`.",
+                parameter="prompt_logprobs_format",
+            )
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(
@@ -692,6 +706,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
     )
     token_ids: list[int] | None = None  # For response
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_logprobs_flat: PromptLogprobsFlat | None = None
     prompt_token_ids: list[int] | None = None  # For prompt
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
