@@ -881,6 +881,37 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
     core.add_request.assert_called_once_with(request, 0)
 
 
+def test_lora_reload_in_place_misses_the_old_prefix_cache():
+    """After an adapter is reloaded in place, its requests hash to new blocks;
+    other adapters and frontend hashes of unreloaded adapters are unchanged."""
+    from vllm.lora.request import LoRARequest
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+
+    init_none_hash(sha256)
+    core = object.__new__(EngineCore)
+    core.mm_receiver_cache = None
+    core.vllm_config = MagicMock(watermark_config=None)
+    core.prefix_hash_config = None
+    core.request_block_hasher = get_request_block_hasher(4, sha256)
+    core._lora_reloads = {}
+    core.model_executor = MagicMock()
+
+    def hashes(name: str) -> list:
+        request = make_request()
+        request.lora_request = LoRARequest(name, 1, "/adapters/" + name)
+        return core.preprocess_add_request(request)[0].block_hashes
+
+    a, b = hashes("a"), hashes("b")
+    assert hashes("a") == a
+    core.add_lora(LoRARequest("a", 1, "/adapters/a", load_inplace=True))
+    reloaded = hashes("a")
+    assert reloaded != a and reloaded[0] != a[0]
+    assert hashes("a") == reloaded and hashes("b") == b
+    core.add_lora(LoRARequest("a", 1, "/adapters/a", load_inplace=True))
+    assert hashes("a") not in (a, reloaded)
+
+
 @pytest.mark.parametrize(
     "pause_state,has_requests,has_batches",
     [
