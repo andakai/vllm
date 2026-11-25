@@ -463,6 +463,14 @@ At the LLM/API layer, call `start_draft_weight_update()` instead of
 `update_weights` / `finish_weight_update` are unchanged. Engines that cannot
 support this set `supports_draft_weight_update = False`.
 
+An EAGLE or MTP drafter uses the target's input embedding and lm_head when it
+has none of its own or its copy equals the target's; then they are one tensor,
+and a draft update writes into the target's. After a start with
+`load_format="dummy"` the copies always compare equal, so a drafter trained
+with its own embedding or head should be started with
+`speculative_config={..., "share_target_weights": False}` and receive them in
+its updates.
+
 ### Implementing a Custom Engine
 
 #### 1. Define Info Dataclasses

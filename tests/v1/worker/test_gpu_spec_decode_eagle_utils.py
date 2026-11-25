@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import _should_share
+from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
+    _should_share,
+    maybe_share_target_embed,
+    share_target_lm_head,
+)
 
 
 class _UnquantizedHead(torch.nn.Module):
@@ -79,3 +84,29 @@ def test_draft_without_own_head_is_shared():
         _UnquantizedHead(torch.ones(4, 8)),
     )
     assert shared is True
+
+
+def test_drafter_keeps_its_copies_when_sharing_is_off(monkeypatch):
+    """After a dummy start the copies compare equal; with sharing off the
+    drafter keeps its own embedding and head, so a draft update cannot write
+    into the target's."""
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True)
+    weight = torch.ones(4, 8)
+    draft_embed = _UnquantizedHead(weight)
+    draft = SimpleNamespace(
+        has_own_lm_head=False,
+        has_own_embed_tokens=False,
+        lm_head=_UnquantizedHead(weight),
+    )
+    draft_inner = SimpleNamespace(embed_tokens=draft_embed)
+
+    maybe_share_target_embed(
+        draft,
+        draft_inner,
+        SimpleNamespace(embed_tokens=_UnquantizedHead(weight)),
+        False,
+    )
+    head = share_target_lm_head(draft, _UnquantizedHead(weight), None, False)
+
+    assert draft_inner.embed_tokens is draft_embed
+    assert head is None
