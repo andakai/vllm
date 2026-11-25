@@ -86,8 +86,18 @@ if triton_kernels_version is not None:
 def store_params_in_triton(layer: torch.nn.Module, **tensors) -> None:
     """Back each loaded param and its triton_kernels tensor by one storage, so the
     param keeps its loaded bytes without a second copy of the data."""
+    params_in_triton = layer.__dict__.setdefault("_params_in_triton", {})
     for name, tensor in tensors.items():
         replace_parameter(layer, name, tensor.storage.data)
+        tensor.storage.data = getattr(layer, name).data
+        params_in_triton[name] = tensor
+
+
+def rebind_params_in_triton(layer: torch.nn.Module) -> None:
+    """Point the triton_kernels tensors back at the layer's params after a reload
+    has copied new values into the params' original storage, so they do not keep
+    the reload's copy alive and read what captured graphs read."""
+    for name, tensor in layer.__dict__.get("_params_in_triton", {}).items():
         tensor.storage.data = getattr(layer, name).data
 
 

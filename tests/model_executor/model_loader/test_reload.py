@@ -74,6 +74,40 @@ def test_preserve_placement_remapping_until_checkpoint_iteration_finishes():
     assert not reload_layerwise.get_layerwise_info(layer).defer_processing
 
 
+def test_reload_points_triton_tensors_at_the_restored_params():
+    """A quant method that keeps triton_kernels tensors over its params' storage
+    gets them pointed back at the params the reload restores, not at the copy
+    it processed, which would otherwise stay allocated."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        store_params_in_triton,
+    )
+
+    class TritonLike(QuantizeMethodBase):
+        def create_weights(self, *args, **kwargs):
+            pass
+
+        def apply(self, layer, *args, **kwargs):
+            pass
+
+        def process_weights_after_loading(self, layer):
+            swizzled = SimpleNamespace(storage=SimpleNamespace(data=layer.weight * 2))
+            store_params_in_triton(layer, weight=swizzled)
+            layer.weight_triton = swizzled
+
+    layer = torch.nn.Linear(2, 2, bias=False)
+    layer.quant_method = TritonLike()
+    layer.quant_method.process_weights_after_loading(layer)
+    kept = layer.weight  # the storage captured graphs read
+    record_metadata_for_reloading(layer)
+    initialize_layerwise_reload(layer)
+    layer.weight.weight_loader(layer.weight, torch.full((2, 2), 3.0))
+    finalize_layerwise_reload(layer, model_config=None)
+
+    assert layer.weight is kept
+    assert layer.weight_triton.storage.data.data_ptr() == kept.data_ptr()
+    assert torch.equal(layer.weight_triton.storage.data, torch.full((2, 2), 6.0))
+
+
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize(
     "module_name,class_name,sink_name",
