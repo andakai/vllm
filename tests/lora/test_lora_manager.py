@@ -446,6 +446,27 @@ def test_target_modules_fail_closed_on_unsupported_matched_modules(
         )
 
 
+@pytest.mark.parametrize("expert_rank", [None, 4, 2])
+def test_reject_moe_lora_above_expert_rank(expert_rank):
+    module_name = "model.layers.0.mlp.experts"
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=1, max_expert_lora_rank=expert_rank
+    )
+    manager.is_pooling_model = False
+    manager.modules = {module_name: FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)}
+    # Merged expert LoRA: (num_experts, rank, input_size) per w1/w2/w3 slice.
+    lora = LoRALayerWeights(module_name, 4, 4, None, None)
+    lora.lora_a = [torch.zeros(2, 4, 16)] * 3
+    adapter = LoRAModel(1, 8, {module_name: lora})
+
+    if expert_rank == 2:
+        with pytest.raises(ValueError, match=r"rank 4 .* max_expert_lora_rank \(2\)"):
+            manager._validate_moe_lora_rank(adapter)
+    else:
+        manager._validate_moe_lora_rank(adapter)
+
+
 def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
     manager = LoRAModelManager.__new__(LoRAModelManager)
     manager.lora_config = LoRAConfig(

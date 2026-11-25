@@ -421,6 +421,7 @@ class LoRAModelManager:
     def _add_adapter(self, lora: LoRAModel):
         self._validate_moe_lora_format(lora)
         self._create_merged_loras_inplace(lora)
+        self._validate_moe_lora_rank(lora)
         self._registered_adapters[lora.id] = lora
 
     def pin_adapter(self, lora_id: int) -> bool:
@@ -784,6 +785,8 @@ class LoRAModelManager:
         sharded MoE wrappers additionally require the dummy rank to be divisible
         by tensor parallel size because they shard W13 along the rank axis.
         """
+        if self.lora_config.max_expert_lora_rank is not None:
+            default_rank = min(default_rank, self.lora_config.max_expert_lora_rank)
         if not self.lora_config.fully_sharded_loras:
             return default_rank
 
@@ -799,13 +802,16 @@ class LoRAModelManager:
         adjusted_rank = (
             (default_rank + required_multiple - 1) // required_multiple
         ) * required_multiple
-        if adjusted_rank > self.lora_config.max_lora_rank:
+        max_rank = (
+            self.lora_config.max_expert_lora_rank or self.lora_config.max_lora_rank
+        )
+        if adjusted_rank > max_rank:
             raise ValueError(
                 "Unable to choose a dummy LoRA warmup rank compatible with "
                 "fully sharded MoE modules: "
                 f"default_rank={default_rank}, "
                 f"required_multiple={required_multiple}, "
-                f"max_lora_rank={self.lora_config.max_lora_rank}"
+                f"max_rank={max_rank}"
             )
         return adjusted_rank
 
@@ -1342,6 +1348,27 @@ class LoRAModelManager:
                     "enable_mixed_moe_lora_format=True "
                     "(--enable-mixed-moe-lora-format) and set "
                     "is_3d_lora_weight=True on the LoRA request."
+                )
+
+    def _validate_moe_lora_rank(self, lora_model: LoRAModel) -> None:
+        rank = self.lora_config.max_expert_lora_rank
+        if rank is None:
+            return
+        for module_name, module in self.modules.items():
+            if not isinstance(module, FusedMoEWithLoRA):
+                continue
+            module_lora = self._get_lora_layer_weights(lora_model, module_name)
+            if module_lora is None:
+                continue
+            # Merged MoE LoRA A: (num_experts, rank, input_size) per slice.
+            lora_a = module_lora.lora_a
+            if not isinstance(lora_a, list):
+                lora_a = [lora_a]
+            lora_rank = max((a.shape[-2] for a in lora_a if a is not None), default=0)
+            if lora_rank > rank:
+                raise ValueError(
+                    f"LoRA adapter {lora_model.id} has rank {lora_rank} in "
+                    f"{module_name!r}, above max_expert_lora_rank ({rank})."
                 )
 
     def _validate_classification_head_lora(self, lora_model: LoRAModel) -> None:
