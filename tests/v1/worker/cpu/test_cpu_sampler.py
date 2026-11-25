@@ -413,6 +413,7 @@ def test_cpu_sampling_mask_matches_wide_finite_support(max_num_kept: int) -> Non
 
 def _make_sampler(
     sampling_params: list[SamplingParams],
+    return_sampling_mask: bool = False,
 ) -> tuple[CPUSampler, torch.Tensor]:
     req_states = CPURequestState(
         max_num_reqs=4,
@@ -427,6 +428,7 @@ def _make_sampler(
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
         req_states=req_states,
+        return_sampling_mask=return_sampling_mask,
     )
     req_indices = []
     for i, params in enumerate(sampling_params):
@@ -552,6 +554,29 @@ def test_cpu_sampler_greedy_returns_argmax() -> None:
     )
 
     assert sampled.tolist() == [1]
+
+
+def test_cpu_sampling_mask_of_greedy_request_is_its_argmax() -> None:
+    sampler, idx_mapping = _make_sampler(
+        [SamplingParams(temperature=0.0), SamplingParams(top_k=2)],
+        return_sampling_mask=True,
+    )
+    logits = torch.tensor([[0.0, 3.0, 2.0, 1.0], [0.0, 1.0, 2.0, 3.0]])
+
+    sampled, processed_logits = sampler.sample(
+        logits,
+        idx_mapping,
+        idx_mapping,
+        idx_mapping.numpy(),
+        torch.tensor([1, 1], dtype=torch.int64),
+        torch.tensor([1, 2], dtype=torch.int32),
+        torch.tensor([0, 0], dtype=torch.int32),
+        np.ones(2, dtype=np.int64),
+    )
+
+    assert sampled[0].item() == 1
+    assert torch.isfinite(processed_logits[0]).nonzero().flatten().tolist() == [1]
+    assert torch.isfinite(processed_logits[1]).nonzero().flatten().tolist() == [2, 3]
 
 
 @pytest.mark.parametrize("algorithm", ["gumbel", "dual-key"])
