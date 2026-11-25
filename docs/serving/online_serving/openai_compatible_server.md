@@ -171,6 +171,10 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-extra-params"
     ```
 
+With `prompt_logprobs`, `"prompt_logprobs_format": "flat"` returns each choice's prompt logprobs in
+`prompt_logprobs_flat` as NumPy arrays, described in [Flat prompt logprobs](token_in_token_out.md#flat-prompt-logprobs),
+instead of one object per position in `prompt_logprobs`. It is not supported with `echo`.
+
 ### Chat API
 
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);

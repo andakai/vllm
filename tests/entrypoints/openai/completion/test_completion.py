@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 from contextlib import suppress
 
+import numpy as np
 import openai  # use the official client for correctness check
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import regex as re
@@ -307,6 +310,46 @@ async def test_prompt_logprobs_completion(
 
         else:
             assert completion.choices[0].prompt_logprobs is None
+
+
+@pytest.mark.asyncio
+async def test_flat_prompt_logprobs_completion(client: openai.AsyncOpenAI):
+    """The flat format returns the dict format's values as the engine's rows:
+    the prompt token, then the top k."""
+    token_ids = [11, 22, 33, 44, 55]
+    params: dict = {"model": MODEL_NAME, "prompt": token_ids, "max_tokens": 1}
+    completion = await client.completions.create(
+        **params, extra_body={"prompt_logprobs": 2}
+    )
+    positions = completion.choices[0].prompt_logprobs
+    assert positions is not None
+
+    completion = await client.completions.create(
+        **params, extra_body={"prompt_logprobs": 2, "prompt_logprobs_format": "flat"}
+    )
+    choice = completion.choices[0]
+    assert choice.prompt_logprobs is None
+    flat = choice.prompt_logprobs_flat
+
+    def load(key: str) -> np.ndarray:
+        return np.load(io.BytesIO(base64.b64decode(flat[key])))
+
+    ids, logprobs, ranks = load("token_ids"), load("logprobs"), load("ranks")
+    assert flat["start"] == 1
+    assert ids.shape == logprobs.shape == (4, 3) and ranks.shape == (4,)
+    assert ids[:, 0].tolist() == token_ids[1:]
+    for row, position in enumerate(positions[1:]):
+        for col in range(3):
+            entry = position[str(ids[row, col])]
+            assert logprobs[row, col] == pytest.approx(entry["logprob"], abs=1e-3)
+        assert ranks[row] == position[str(ids[row, 0])]["rank"]
+
+    with pytest.raises(BadRequestError):
+        await client.completions.create(
+            **params,
+            echo=True,
+            extra_body={"prompt_logprobs": 2, "prompt_logprobs_format": "flat"},
+        )
 
 
 @pytest.mark.asyncio

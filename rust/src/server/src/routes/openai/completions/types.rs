@@ -13,6 +13,7 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::{Prompt, TruncationSide};
 
+use crate::routes::inference::generate::{PromptLogprobsFlat, PromptLogprobsFormat};
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
@@ -195,6 +196,10 @@ pub struct CompletionRequest {
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
+    /// `flat` returns prompt logprobs in `prompt_logprobs_flat`, NumPy arrays
+    /// in base64, instead of one object per position.
+    pub prompt_logprobs_format: Option<PromptLogprobsFormat>,
+
     /// Specific vocab token IDs to return logprobs for at each generated
     /// position, in addition to the sampled token. Takes precedence over
     /// the top-k selected by `logprobs`. Requires `logprobs` to be set.
@@ -300,6 +305,7 @@ pub(super) struct CompletionChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub prompt_logprobs: Option<PromptLogprobs>,
+    pub prompt_logprobs_flat: Option<PromptLogprobsFlat>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
     /// The request's routed-expert rows as a base64 NumPy `.npy`, when
