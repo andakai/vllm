@@ -241,6 +241,8 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
+        # In-place reloads per LoRA name, which salt its later requests' cache.
+        self._lora_reloads: dict[str, int] = {}
         # Lets frontends hash prompt blocks; see EngineCoreRequest.block_hashes.
         self.prefix_hash_config: PrefixHashConfig | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
@@ -1225,7 +1227,11 @@ class EngineCore:
         return self.collective_rpc("compute_weight_checksums")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        added = self.model_executor.add_lora(lora_request)
+        if lora_request.load_inplace:
+            name = lora_request.lora_name
+            self._lora_reloads[name] = self._lora_reloads.get(name, 0) + 1
+        return added
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_executor.remove_lora(lora_id)
@@ -1292,6 +1298,13 @@ class EngineCore:
             params.watermarking = True
 
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
+        lora = request.lora_request
+        if lora is not None and (reloads := self._lora_reloads.get(lora.lora_name)):
+            # Blocks cached under the adapter's name and path before a reload
+            # hold KV computed with its previous weights; salt this request so
+            # it cannot reuse them. The frontend hashed without the salt.
+            request.cache_salt = f"{request.cache_salt or ''}\0lora-reload-{reloads}"
+            frontend_hashes = None
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
         )

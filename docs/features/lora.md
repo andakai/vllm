@@ -217,7 +217,7 @@ Alternatively, follow these example steps to implement your own plugin:
 
 When dynamically loading LoRA adapters, you may need to replace an existing adapter with updated weights while keeping the same name. The `load_inplace` parameter enables this functionality. This commonly occurs in asynchronous reinforcement learning setups, where adapters are continuously updated and swapped in without interrupting ongoing inference.
 
-When `load_inplace=True`, vLLM will replace the existing adapter with the new one.
+When `load_inplace=True`, vLLM will replace the existing adapter with the new one. Requests for that adapter that arrive after the reload do not reuse prefix-cache blocks computed with its previous weights, even when the new weights come from the same path; the cached prefixes of other adapters and of the base model are kept. Offline, reload with `llm.llm_engine.add_lora(LoRARequest(..., load_inplace=True))`.
 
 Example request to load or replace a LoRA adapter with the same name:
 
