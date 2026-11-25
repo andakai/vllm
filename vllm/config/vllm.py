@@ -785,17 +785,20 @@ class VllmConfig:
 
         Dynamic speculative decoding drafts as many tokens as its schedule gives
         the batch size, so a query length only runs up to the largest batch size
-        that drafts its number of tokens.
+        that drafts its number of tokens. The counts the engine can switch to
+        at runtime run at any batch size.
         """
         max_num_seqs = self.scheduler_config.max_num_seqs
         speculative_config = self.speculative_config
         num_new_sampled_tokens = decode_query_len - self.num_speculative_tokens
-        if (
-            speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
-            or num_new_sampled_tokens <= 0
-        ):
+        if speculative_config is None or num_new_sampled_tokens <= 0:
             return {decode_query_len: max_num_seqs}
+        runtime_query_lens = {
+            k + num_new_sampled_tokens: max_num_seqs
+            for k in speculative_config.runtime_num_speculative_tokens or ()
+        }
+        if not speculative_config.uses_dynamic_speculative_decoding():
+            return {**runtime_query_lens, decode_query_len: max_num_seqs}
         from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 
         dense_schedule = build_dynamic_sd_schedule_lookup(
@@ -804,11 +807,12 @@ class VllmConfig:
             vllm_num_speculative_tokens=self.num_speculative_tokens,
         )
         # By ascending batch size, so each query length keeps its widest batch.
-        return {
+        scheduled_query_lens = {
             k + num_new_sampled_tokens: batch_size
             for batch_size, k in enumerate(dense_schedule)
             if batch_size > 0
         }
+        return {**scheduled_query_lens, **runtime_query_lens}
 
     def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
         """Request counts of the FULL graphs of one-token draft decodes, the

@@ -943,6 +943,19 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        config = self.vllm_config
+        if config.speculative_config is None:
+            raise ValueError("Speculative decoding is not enabled.")
+        if config.parallel_config.data_parallel_size > 1 and config.model_config.is_moe:
+            # Ranks would switch at different steps and disagree on the number
+            # of draft steps, as with a batch-size schedule (see VllmConfig).
+            raise ValueError(
+                "Changing num_speculative_tokens is not supported with data "
+                "parallelism for MoE models."
+            )
+        self.scheduler.set_num_speculative_tokens(num_speculative_tokens)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

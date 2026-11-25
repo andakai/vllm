@@ -268,6 +268,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
                 "/update_weight_version",
                 post(weight_transfer::update_weight_version),
             )
+            .route(
+                "/set_num_speculative_tokens",
+                post(weight_transfer::set_num_speculative_tokens),
+            )
             .route("/weight_info", get(weight_transfer::weight_info))
             .route("/weight_checker", post(weight_checker::weight_checker))
             .route("/abort_requests", post(abort_requests::abort_requests))

@@ -235,6 +235,11 @@ class SchedulerInterface(ABC):
         """
         raise NotImplementedError
 
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        """Change the number of draft tokens per step; None restores the
+        configured number."""
+        raise NotImplementedError
+
     @abstractmethod
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.

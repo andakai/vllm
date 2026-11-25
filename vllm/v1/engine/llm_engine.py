@@ -528,6 +528,9 @@ class LLMEngine:
     def set_weight_version(self, weight_version: str) -> None:
         self.engine_core.set_weight_version(weight_version)
 
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        self.engine_core.set_num_speculative_tokens(num_speculative_tokens)
+
     def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return self.engine_core.get_weight_version()

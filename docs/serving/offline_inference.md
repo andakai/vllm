@@ -67,6 +67,7 @@ For further details on Weight Transfer, please refer to [this page](../training/
 - `LLM.finish_weight_update` - Finishes the current weight update cycle.
 - `LLM.update_weight_version` - Sets the weight version without updating model weights.
 - `LLM.get_weight_version` - Returns the latest committed weight version.
+- `LLM.set_num_speculative_tokens` - Changes the number of draft tokens per step, see [Dynamic Speculative Decoding](../features/speculative_decoding/dynamic_speculative_decoding.md#changing-k-at-runtime).
 
 ## Additional APIs
 

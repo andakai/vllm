@@ -223,6 +223,25 @@ async def update_weight_version(
     return JSONResponse(content={"success": True, "new_version": new_version})
 
 
+@router.post("/set_num_speculative_tokens")
+async def set_num_speculative_tokens(
+    raw_request: Request,
+    num_speculative_tokens: Annotated[int | None, Body(embed=True, ge=0)] = None,
+) -> JSONResponse:
+    """Draft at most this many tokens per step, 0 to stop drafting; null
+    restores the configured number."""
+    try:
+        await engine_client(raw_request).set_num_speculative_tokens(
+            num_speculative_tokens
+        )
+    except Exception as err:
+        # The call only validates the count against the engine's config.
+        return JSONResponse(
+            content={"error": str(err)}, status_code=HTTPStatus.BAD_REQUEST.value
+        )
+    return JSONResponse(content={"num_speculative_tokens": num_speculative_tokens})
+
+
 @router.get("/weight_info")
 async def weight_info(raw_request: Request):
     weight_version = await engine_client(raw_request).get_weight_version()
