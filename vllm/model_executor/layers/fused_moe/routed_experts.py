@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import (
@@ -78,6 +78,9 @@ class RoutedExperts(PluggableLayer):
     - Loading checkpoint weights into parameters
     - Executing routed experts via quant_method.apply()
     """
+
+    # This layer's EPLB placement, set once EPLB manages the model.
+    eplb_layer_state: EplbLayerState | None = None
 
     # Hash-routing table, owned by the gate.
     hash_indices_table: torch.Tensor | None = None
@@ -702,6 +705,58 @@ class RoutedExperts(PluggableLayer):
     ) -> bool: ...
 
     def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: bool = False,
+    ) -> bool | None:
+        slots = self._eplb_slots(expert_id, weight_name, loaded_weight)
+        if slots is None:
+            return self._load_expert(
+                param, loaded_weight, weight_name, shard_id, expert_id, return_success
+            )
+        loaded = False
+        for slot in slots:
+            loaded |= bool(
+                self._load_expert(
+                    param, loaded_weight, weight_name, shard_id, slot, True
+                )
+            )
+        return loaded if return_success else None
+
+    def _eplb_slots(
+        self, expert_id: int, weight_name: str, loaded_weight: torch.Tensor
+    ) -> list[int] | None:
+        """The physical slots that hold this checkpoint expert now, or None to
+        load by the initial placement.
+
+        Weight mappings name physical slots by the initial EPLB placement,
+        which a rebalance changes, layer by layer. Once EPLB manages the layer,
+        a logical expert is written to every slot it occupies now, and the
+        initial ids of redundant slots load nothing.
+        """
+        state = self.eplb_layer_state
+        if (
+            state is None
+            or state.logical_to_physical_map is None
+            or state.logical_replica_count is None
+            # Fused shared experts and expert substitution place experts
+            # outside the EPLB map; a stacked tensor fills every slot at once.
+            or self.expert_map_manager.num_fused_shared_experts
+            or getattr(self, "expert_substitution", None) is not None
+            or loaded_weight.dim() == 3
+            or "input_scale" in weight_name
+        ):
+            return None
+        if expert_id >= self.moe_config.num_logical_experts:
+            return []
+        count = int(state.logical_replica_count[expert_id])
+        return state.logical_to_physical_map[expert_id, :count].tolist()
+
+    def _load_expert(
         self,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,

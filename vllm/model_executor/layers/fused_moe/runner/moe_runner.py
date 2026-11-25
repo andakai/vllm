@@ -1121,3 +1121,5 @@ class MoERunner(MoERunnerInterface):
                 logical_to_physical_map,
                 logical_replica_count,
             )
+            # Reloaded experts go where EPLB has placed them since.
+            self.routed_experts.eplb_layer_state = self.router.eplb_state

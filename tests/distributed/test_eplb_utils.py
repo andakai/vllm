@@ -17,6 +17,7 @@ from vllm.config import ParallelConfig
 from vllm.config.parallel import EPLBConfig
 from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb.eplb_state import (
+    EplbLayerState,
     EplbModelState,
     EplbState,
 )
@@ -27,6 +28,7 @@ from vllm.distributed.eplb.rebalance_execute import (
     TransferMetadata,
 )
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
@@ -98,6 +100,36 @@ def _make_model_state(
         device_index=None,
         communicator=MagicMock(),
     )
+
+
+def test_reload_writes_experts_where_eplb_placed_them():
+    """Once EPLB manages a layer, a checkpoint expert is loaded into every slot
+    it occupies now, and initial ids of redundant slots load nothing."""
+    experts = object.__new__(RoutedExperts)
+    torch.nn.Module.__init__(experts)
+    experts.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
+    experts.moe_config = SimpleNamespace(num_logical_experts=4)
+    slots: list[int] = []
+    experts._load_expert = lambda *args: slots.append(args[4]) or True
+    weight = torch.zeros(2, 2)
+
+    def load(expert_id: int) -> bool:
+        slots.clear()
+        return experts.weight_loader(
+            None, weight, "experts.w13_weight", "w1", expert_id, return_success=True
+        )
+
+    # Before EPLB has a placement, ids are the initial physical slots.
+    assert load(5) and slots == [5]
+
+    # After a rebalance over 6 slots: logical 2 sits in slots 0 and 4.
+    experts.eplb_layer_state = EplbLayerState(
+        logical_to_physical_map=torch.tensor([[5, -1], [1, -1], [0, 4], [3, -1]]),
+        logical_replica_count=torch.tensor([1, 1, 2, 1]),
+    )
+    assert load(2) and slots == [0, 4]
+    assert load(0) and slots == [5]
+    assert not load(5) and slots == []
 
 
 def test_commit_eplb_maps_shape_change():
