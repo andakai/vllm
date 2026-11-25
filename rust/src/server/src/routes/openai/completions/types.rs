@@ -195,6 +195,11 @@ pub struct CompletionRequest {
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
+    /// Compute prompt logprobs only for the prompt tokens after this 0-based
+    /// position; tokens `0..=prompt_logprob_start` come back as null.
+    /// Requires `prompt_logprobs`.
+    pub prompt_logprob_start: Option<u32>,
+
     /// Specific vocab token IDs to return logprobs for at each generated
     /// position, in addition to the sampled token. Takes precedence over
     /// the top-k selected by `logprobs`. Requires `logprobs` to be set.

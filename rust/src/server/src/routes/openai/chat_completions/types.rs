@@ -179,6 +179,11 @@ pub struct ChatCompletionRequest {
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
+    /// Compute prompt logprobs only for the prompt tokens after this 0-based
+    /// position; tokens `0..=prompt_logprob_start` come back as null.
+    /// Requires `prompt_logprobs`.
+    pub prompt_logprob_start: Option<u32>,
+
     /// Specific vocab token IDs to return logprobs for at each generated
     /// position, in addition to the sampled token. Takes precedence over
     /// `top_logprobs`. Requires `logprobs=true`.
@@ -339,6 +344,7 @@ impl Default for ChatCompletionRequest {
             truncate_prompt_tokens: None,
             truncation_side: None,
             prompt_logprobs: None,
+            prompt_logprob_start: None,
             logprob_token_ids: None,
             allowed_token_ids: None,
             bad_words: None,

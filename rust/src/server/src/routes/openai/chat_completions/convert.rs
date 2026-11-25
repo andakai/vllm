@@ -171,7 +171,7 @@ pub(super) fn prepare_chat_request(
             logprobs,
             prompt_logprobs,
             prompt_logprob_token_ids: None,
-            prompt_logprob_start: None,
+            prompt_logprob_start: request.prompt_logprob_start,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
