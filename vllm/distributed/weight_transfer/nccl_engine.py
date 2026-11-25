@@ -593,6 +593,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         # update_weights (workers receive) must run concurrently with the
         # trainer-side broadcast — both rendezvous inside the same NCCL calls.
         exe = ThreadPoolExecutor(max_workers=1)
+        group = self.model_update_group
+        assert group is not None
         try:
             future = exe.submit(self.client.update_weights, payload)
             # Cheap best-effort: if update_weights already failed (e.g. a bad
@@ -600,7 +602,20 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             # hanging in broadcast waiting for a peer that will never arrive.
             if future.done():
                 future.result()
-            self._broadcast(meta, src)
+            # Workers that fail mid-transfer (e.g. out of memory) stop
+            # receiving, and the broadcast would wait for them forever. Abort
+            # the transfer group so it returns, then raise their error below.
+            future.add_done_callback(
+                lambda f: f.exception() is not None and group.destroy()
+            )
+            try:
+                self._broadcast(meta, src)
+            except Exception:
+                if not (future.done() and future.exception() is not None):
+                    raise
+            if future.exception() is not None:
+                # The group is aborted; trainer_init() starts a new one.
+                self.model_update_group = None
             future.result()  # surface inference-side errors
         finally:
             # Never wait for the RPC thread here. If the broadcast raised, the

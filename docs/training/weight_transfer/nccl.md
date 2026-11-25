@@ -161,6 +161,13 @@ rank raises immediately, but the other trainer ranks and the inference workers
 can stay blocked in that update's broadcasts, so tear down the trainer job and
 restart or re-initialize the inference engine before transferring again.
 
+If the inference workers fail during an update (for example, running out of
+memory while receiving), they stop receiving and `update_weights` returns their
+error. The sender then aborts its transfer group, so its broadcast returns
+instead of waiting for them, and `send_weights` raises that error. With a single
+broadcaster, the server keeps serving: call `shutdown_weight_transfer_engine()`
+on the client, then `trainer_init` again, to transfer again.
+
 [`rlhf_nccl_multi_source.py`](../../../examples/rl/rlhf_nccl_multi_source.py)
 shows two pipeline stages updating one tensor-parallel inference engine.
 

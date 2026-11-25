@@ -2542,6 +2542,42 @@ def test_nccl_trainer_resends_metadata_after_a_failed_update():
     assert client.last_update_info["names"] == ["v", "w"]
 
 
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_aborts_the_group_when_update_weights_fails():
+    """Workers that fail mid-transfer stop receiving: the sender aborts its
+    group so its broadcast returns, and raises the workers' error."""
+    started, aborted = threading.Event(), threading.Event()
+
+    class FailingUpdate(RecordingClient):
+        def update_weights(self, update_info: dict) -> None:
+            super().update_weights(update_info)
+            assert started.wait(30)  # fail mid-transfer
+            raise RuntimeError("worker out of memory")
+
+    def broadcast(*args, **kwargs):
+        started.set()
+        # A broadcast no worker receives returns only when the group aborts.
+        assert aborted.wait(30), "the broadcast was never aborted"
+
+    group = MagicMock(rank=0)
+    group.broadcast.side_effect = broadcast
+    group.destroy.side_effect = aborted.set
+    engine = NCCLTrainerWeightTransferEngine(
+        client=FailingUpdate(),
+        source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
+        packed=False,
+    )
+    engine.model_update_group = group
+
+    with pytest.raises(RuntimeError, match="worker out of memory"):
+        engine.send_weights()
+    group.destroy.assert_called_once()
+    assert engine.model_update_group is None
+
+
 def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
     """Empty update info reuses the previous call's metadata for the same
     (model, src) and receives from that src; re-init clears every entry, and
