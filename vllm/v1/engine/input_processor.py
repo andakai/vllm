@@ -25,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import parse_model_prompt
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams, SamplingType
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -178,17 +178,16 @@ class InputProcessor:
                     vocab_size=self.model_config.get_vocab_size(),
                 )
 
-            if self.model_config.return_sampling_mask:
-                if params.temperature <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires temperature > 0"
-                    )
-                if params.top_k <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires top_k > 0 to "
-                        "bound sampling mask size, reduce transfer overhead, "
-                        "and avoid potential OOMs"
-                    )
+            if (
+                self.model_config.return_sampling_mask
+                and params.sampling_type != SamplingType.GREEDY
+                and params.top_k <= 0
+            ):
+                raise ValueError(
+                    "sampling distribution replay requires top_k > 0 to "
+                    "bound sampling mask size, reduce transfer overhead, "
+                    "and avoid potential OOMs"
+                )
             if params.thinking_token_budget is not None and (
                 self.vllm_config.reasoning_config is None
                 or not self.vllm_config.reasoning_config.enabled

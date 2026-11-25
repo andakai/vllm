@@ -9,7 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -99,6 +99,13 @@ class Sampler:
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
         may_mask = self.sampling_states.masks_logits(req_idx)
+        if (
+            self.return_sampling_mask
+            and sampling_params.sampling_type == SamplingType.GREEDY
+        ):
+            # Greedy samples the argmax alone: report it as the support.
+            self.sampling_states.top_k.np[req_idx] = 1
+            may_mask = True
         may_mask |= self.thinking_budget_state.add_request(req_idx, sampling_params)
         for processor in self.logits_processors:
             may_mask |= processor.add_request(req_idx, sampling_params)

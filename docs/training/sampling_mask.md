@@ -61,8 +61,11 @@ With `stream=true`, each chunk carries the masks of the tokens it emits.
 | --- | --- |
 | `--return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
-| `temperature > 0` | Greedy has no truncated distribution |
-| `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
+| `top_k > 0` for sampled requests | Bounds mask size; pure top-p can produce vocab-sized masks |
+
+Greedy requests (`temperature=0`) are accepted on the same server. Their
+support is the argmax alone, so each mask holds the generated token, and in
+`processed_logprobs` mode its logprob is 0.
 
 Speculative decoding is supported; each emitted token gets the support of the
 target distribution at its position.

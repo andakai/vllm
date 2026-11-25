@@ -15,7 +15,7 @@ from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
@@ -585,6 +585,13 @@ class CPUSampler:
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
+        if (
+            self.return_sampling_mask
+            and sampling_params.sampling_type == SamplingType.GREEDY
+        ):
+            # Greedy samples the argmax alone: report it as the support.
+            self.sampling_states.top_k_np[req_idx] = 1
+            needs_processing = True
         needs_processing |= self.thinking_budget_state.add_request(
             req_idx, sampling_params
         )

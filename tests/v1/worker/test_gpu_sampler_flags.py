@@ -32,7 +32,10 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> Sampler:
+def _make_sampler(
+    custom_logits_processors: Sequence[LogitsProcessor] = (),
+    return_sampling_mask: bool = False,
+) -> Sampler:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -48,6 +51,7 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
         device=DEVICE,
         req_states=req_states,
         custom_logits_processors=custom_logits_processors,
+        return_sampling_mask=return_sampling_mask,
     )
 
 
@@ -149,3 +153,31 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+def test_sampling_mask_of_greedy_request_is_its_argmax():
+    sampler = _make_sampler(return_sampling_mask=True)
+    sampler.add_request(0, SamplingParams(temperature=0.0))
+    sampler.add_request(1, SamplingParams(top_k=2))
+    sampler.apply_staged_writes()
+    idx_np = np.array([0, 1], dtype=np.int32)
+    idx = torch.from_numpy(idx_np).to(DEVICE)
+    logits = torch.tensor(
+        [[0.0, 3.0, 2.0, 1.0], [0.0, 1.0, 2.0, 3.0]], device=DEVICE
+    ).repeat(1, VOCAB_SIZE // 4)
+    logits[:, 4:] = -10.0
+
+    sampled, processed_logits = sampler.sample(
+        logits,
+        idx,
+        idx,
+        idx_np,
+        torch.ones(2, dtype=torch.int64, device=DEVICE),
+        torch.ones(2, dtype=torch.int32, device=DEVICE),
+        torch.zeros(2, dtype=torch.int32, device=DEVICE),
+        np.ones(2, dtype=np.int64),
+    )
+
+    assert sampled[0].item() == 1
+    assert torch.isfinite(processed_logits[0]).nonzero().flatten().tolist() == [1]
+    assert torch.isfinite(processed_logits[1]).nonzero().flatten().tolist() == [2, 3]
