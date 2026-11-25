@@ -4,7 +4,7 @@
 
 import pickle
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import pybase64 as base64
 import torch
@@ -21,6 +21,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
+from vllm.distributed.weight_transfer.ipc_handles import decode_ipc_args, is_encoded
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -58,12 +59,14 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     dtype_names: list[str]
     shapes: list[list[int]]
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple] | None = None
-    """IPC handles mapping physical GPU UUID to rebuild_cuda_tensor args.
+    """IPC handles mapping physical GPU UUID to rebuild_cuda_tensor args, or
+    to their JSON form (`ipc_handles.encode_ipc_args`), as HTTP sends them.
     For non-packed mode: list of per-parameter handle dicts.
     For packed mode: the packed buffer's handle dict in the first chunk of a
     transfer with bytes, else empty."""
     ipc_handles_pickled: str | None = None
-    """Base64-encoded pickled IPC handles, used for HTTP transport."""
+    """Base64-encoded pickled IPC handles, the older HTTP form; deserialized
+    only with VLLM_ALLOW_INSECURE_SERIALIZATION=1."""
     chunk_capacity: int | None = None
     """Packed mode: the chunk size in bytes, set on the first chunk."""
     last: bool = False
@@ -89,6 +92,7 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
             raise ValueError(
                 "Either `ipc_handles` or `ipc_handles_pickled` must be provided"
             )
+        self.ipc_handles = _decode_handles(self.ipc_handles)
         num_params = len(self.names)
         if len(self.dtype_names) != num_params:
             raise ValueError(
@@ -108,6 +112,20 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
                 f"`ipc_handles` should be of the same size as `names`: "
                 f"got {len(self.ipc_handles)} and {len(self.names)}"
             )
+
+
+def _decode_handles(
+    ipc_handles: list[dict[str, Any]] | dict[str, Any],
+) -> list[dict[str, tuple]] | dict[str, tuple]:
+    def decode(handle: dict[str, Any]) -> dict[str, tuple]:
+        return {
+            uuid: decode_ipc_args(args) if is_encoded(args) else args
+            for uuid, args in handle.items()
+        }
+
+    if isinstance(ipc_handles, list):
+        return [decode(handle) for handle in ipc_handles]
+    return decode(ipc_handles)
 
 
 class IPCWeightTransferEngine(

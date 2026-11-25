@@ -201,9 +201,8 @@ Two things to get right in any adapter:
   with the worker.
 
 !!! note
-    HTTP cannot carry raw CUDA IPC handles, so `HTTPVLLMWeightSyncClient` pickles
-    and base64-encodes them into an `ipc_handles_pickled` field. The worker
-    deserializes it only when `VLLM_ALLOW_INSECURE_SERIALIZATION=1`. Backends
+    HTTP cannot carry raw CUDA IPC handles, so `HTTPVLLMWeightSyncClient` sends
+    each in a JSON form that the worker rebuilds without unpickling. Backends
     whose payloads are JSON-native (NCCL) pass through untouched.
 
 ### TrainerWeightTransferEngine

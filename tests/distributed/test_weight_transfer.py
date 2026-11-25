@@ -8,6 +8,7 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 
 import builtins
 import importlib.util
+import json
 import math
 import pickle
 import runpy
@@ -51,6 +52,10 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
 )
+from vllm.distributed.weight_transfer.ipc_handles import (
+    decode_ipc_args,
+    encode_ipc_args,
+)
 from vllm.distributed.weight_transfer.nccl_common import (
     run_trainer_rendezvous,
     uid_init_process_group,
@@ -76,6 +81,25 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
 from vllm.platforms import current_platform
 from vllm.utils.nccl import _nccl_has_no_cache
 from vllm.utils.network_utils import get_open_port
+
+# `reduce_tensor(t)[1]` of a 10x10 float16 CUDA tensor, with made-up handles.
+_IPC_ARGS = (
+    torch.Tensor,
+    torch.Size([10, 10]),
+    (10, 1),
+    0,
+    torch.storage.TypedStorage,
+    torch.float16,
+    0,
+    b"\x01" * 64,
+    200,
+    0,
+    False,
+    b"/torch_123_456",
+    3,
+    None,
+    True,
+)
 
 
 def _init_ray_for_weight_transfer() -> None:
@@ -1929,30 +1953,34 @@ class TestTrainerClients:
         client.shutdown_weight_transfer_engine()
         handle.shutdown_weight_transfer_engine.remote.assert_called_once_with()
 
-    def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
-        """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
+    def test_http_client_sends_ipc_handles_as_json(self, monkeypatch):
+        """HTTP update_weights sends IPC handles in a JSON form that the worker
+        rebuilds without unpickling, with insecure serialization off."""
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0")
         captured = {}
 
         def fake_post(self, path, json=None):
-            captured["path"] = path
             captured["json"] = json
 
         monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
         client = HTTPVLLMWeightSyncClient("http://localhost:8000")
-        client.update_weights({"names": ["w"], "ipc_handles": [{"gpu": ("args",)}]})
-        sent = captured["json"]["update_info"]
-        assert "ipc_handles" not in sent
-        assert "ipc_handles_pickled" in sent
-        assert pickle.loads(base64.b64decode(sent["ipc_handles_pickled"])) == [
-            {"gpu": ("args",)}
-        ]
+        meta = {"names": ["w"], "dtype_names": ["float16"], "shapes": [[10, 10]]}
+        client.update_weights({**meta, "ipc_handles": [{"gpu": _IPC_ARGS}]})
+        sent = json.loads(json.dumps(captured["json"]["update_info"]))
+        assert "ipc_handles_pickled" not in sent
+        assert IPCWeightTransferUpdateInfo(**sent).ipc_handles == [{"gpu": _IPC_ARGS}]
 
-        client.update_weights([{"ipc_handles": {"gpu": ("args",)}}, {"names": []}])
+        client.update_weights([{"ipc_handles": {"gpu": _IPC_ARGS}}, {"names": []}])
         sent = captured["json"]["update_info"]
         assert sent[1] == {"names": []}
-        assert pickle.loads(base64.b64decode(sent[0]["ipc_handles_pickled"])) == {
-            "gpu": ("args",)
-        }
+        assert decode_ipc_args(sent[0]["ipc_handles"]["gpu"]) == _IPC_ARGS
+
+    def test_json_ipc_handle_rejects_other_classes(self):
+        encoded = encode_ipc_args(_IPC_ARGS)
+        with pytest.raises(ValueError, match="Unexpected storage_cls"):
+            decode_ipc_args({**encoded, "storage_cls": "builtins.eval"})
+        with pytest.raises(ValueError, match="Unexpected dtype"):
+            decode_ipc_args({**encoded, "dtype": "load"})
 
     def test_http_client_passes_through_nccl_update_info(self, monkeypatch):
         """NCCL update_info has only JSON-native fields and passes unchanged."""

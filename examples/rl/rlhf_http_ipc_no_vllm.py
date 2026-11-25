@@ -6,16 +6,15 @@ The trainer uses only `torch`, `requests`, `safetensors`, `pybase64` and the
 stdlib, and speaks the wire protocol in
 `docs/training/weight_transfer/ipc.md` ("Trainer Without vLLM over HTTP"):
 it exports its tensors with `torch.multiprocessing.reductions.reduce_tensor`
-and sends the handles, pickled and base64-encoded, in `ipc_handles_pickled`.
+and sends each handle in its JSON form (`ipc_handle_json` below).
 
 IPC requires colocation: this process holds a full copy of the weights on every
 GPU the server uses, and keys each handle by that GPU's UUID. A multi-process
 trainer would instead gather the per-rank `{uuid: args}` dicts to one rank.
 
-Start a server; IPC handles are pickled, so it needs
-`VLLM_ALLOW_INSECURE_SERIALIZATION=1` (the weights it starts with are discarded):
+Start a server (the weights it starts with are discarded):
 
-    VLLM_SERVER_DEV_MODE=1 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+    VLLM_SERVER_DEV_MODE=1 \
         CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3-0.6B \
         --load-format dummy --enforce-eager --gpu-memory-utilization 0.4 \
         --weight-transfer-config '{"backend": "ipc"}'
@@ -43,7 +42,6 @@ sys.meta_path.insert(0, _BlockVLLM())
 
 import argparse  # noqa: E402
 import glob  # noqa: E402
-import pickle  # noqa: E402
 
 import pybase64 as base64  # noqa: E402
 import requests  # noqa: E402
@@ -80,6 +78,27 @@ def generate(prompts: list[str]) -> list[str]:
 Weights = dict[str, dict[str, torch.Tensor]]
 
 
+IPC_FIELDS = (
+    "tensor_cls", "size", "stride", "tensor_offset", "storage_cls", "dtype",
+    "device", "handle", "storage_size_bytes", "storage_offset_bytes",
+    "requires_grad", "ref_counter_handle", "ref_counter_offset", "event_handle",
+    "event_sync_required",
+)  # fmt: skip
+
+
+def ipc_handle_json(args: tuple) -> dict:
+    """JSON form of `reduce_tensor(t)[1]`, the rebuild_cuda_tensor args."""
+    out = dict(zip(IPC_FIELDS, args, strict=True))
+    for key in ("tensor_cls", "storage_cls"):
+        out[key] = f"{out[key].__module__}.{out[key].__qualname__}"
+    out["size"], out["stride"] = list(out["size"]), list(out["stride"])
+    out["dtype"] = str(out["dtype"]).removeprefix("torch.")
+    for key in ("handle", "ref_counter_handle", "event_handle"):
+        if out[key] is not None:
+            out[key] = base64.b64encode(out[key]).decode()
+    return out
+
+
 def update_weights(
     weights: Weights,
     names: list[str],
@@ -92,7 +111,11 @@ def update_weights(
         "names": names,
         "dtype_names": [str(w[n].dtype).removeprefix("torch.") for n in names],
         "shapes": [list(w[n].shape) for n in names],
-        "ipc_handles_pickled": base64.b64encode(pickle.dumps(ipc_handles)).decode(),
+        "ipc_handles": (
+            [{u: ipc_handle_json(a) for u, a in h.items()} for h in ipc_handles]
+            if isinstance(ipc_handles, list)
+            else {u: ipc_handle_json(a) for u, a in ipc_handles.items()}
+        ),
         "chunk_capacity": chunk_capacity,
         "last": last,
     }

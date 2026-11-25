@@ -20,8 +20,8 @@ and it rides the client, so there is no concurrent broadcast to overlap with.
     assumes that group is exactly the set of colocated trainer ranks and that the
     sender is a member. It is a no-op when no distributed group exists.
 
-!!! warning
-    IPC handles involve sending serialized Python objects. When using HTTP transport, you must set `VLLM_ALLOW_INSECURE_SERIALIZATION=1` on both the server and client. This is because IPC handles are pickled and base64-encoded for HTTP transmission.
+!!! note
+    Over HTTP, each IPC handle is sent in a JSON form that the worker rebuilds from plain values and a fixed set of torch classes, so no `VLLM_ALLOW_INSECURE_SERIALIZATION` is needed. The older pickled field `ipc_handles_pickled` is still accepted when the server sets `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.
 
 ## Inference Side
 
@@ -112,9 +112,7 @@ handled inside `send_weights()`.
 ## Trainer Without vLLM over HTTP
 
 A colocated trainer can speak the [HTTP endpoints](README.md#api-endpoints)
-directly, with only PyTorch and an HTTP client. The server needs
-`VLLM_ALLOW_INSECURE_SERIALIZATION=1`; without it, init and start return 200 and
-the first `/update_weights` returns 500. Reference:
+directly, with only PyTorch and an HTTP client. Reference:
 [`rlhf_http_ipc_no_vllm.py`](../../../examples/rl/rlhf_http_ipc_no_vllm.py).
 
 `POST /init_weight_transfer_engine` body: `{"init_info": {"packed": false}}`.
@@ -124,7 +122,7 @@ the first `/update_weights` returns 500. Reference:
 | Field | Meaning |
 | ----- | ------- |
 | `names`, `dtype_names`, `shapes` | Checkpoint names, `torch` dtype attribute names (`"bfloat16"`), full shapes. Packed: only the tensors whose first bytes are in this chunk |
-| `ipc_handles_pickled` | `base64(pickle.dumps(handles))`. Unpacked: a list with one dict per name. Packed: one dict for the shared buffer in the first chunk, `{}` in the rest |
+| `ipc_handles` | Handle dicts in JSON form (below). Unpacked: a list with one dict per name. Packed: one dict for the shared buffer in the first chunk, `{}` in the rest |
 | `chunk_capacity` | Packed: the chunk size in bytes, a multiple of 16, on the first chunk only |
 | `last` | Packed: `true` on the chunk that ends the transfer, else `false` (the default) |
 
@@ -133,8 +131,15 @@ the first `/update_weights` returns 500. Reference:
   `gpu_uuid = str(torch.cuda.get_device_properties(i).uuid)`, **without** the
   `GPU-` prefix that `nvidia-smi` prints. The worker overwrites `args[6]`
   (device index) with its own.
-- `ipc_handles` (unpickled) is not JSON-serializable; over HTTP use
-  `ipc_handles_pickled`.
+- Over HTTP each `reduce_tensor(t)[1]` tuple is sent as an object with its 15
+  arguments by name: `tensor_cls`, `size`, `stride`, `tensor_offset`,
+  `storage_cls`, `dtype`, `device`, `handle`, `storage_size_bytes`,
+  `storage_offset_bytes`, `requires_grad`, `ref_counter_handle`,
+  `ref_counter_offset`, `event_handle`, `event_sync_required`. Classes are
+  `"module.QualName"` (`torch._tensor.Tensor`, `torch.storage.TypedStorage`, ...),
+  `dtype` is the attribute name (`"bfloat16"`), sizes are lists, and the three
+  handles are base64 strings (or `null`). The worker accepts only the tensor
+  and storage classes `reduce_tensor` produces.
 - Packed: export one `uint8` buffer once per transfer, large enough for its
   largest chunk; send
   its handle and `chunk_capacity` with the first chunk only, and reuse it for
