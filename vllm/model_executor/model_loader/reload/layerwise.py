@@ -489,6 +489,13 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
 
     _place_kernel_tensors(layer, info)
 
+    if "_params_in_triton" in layer.__dict__:
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            rebind_params_in_triton,
+        )
+
+        rebind_params_in_triton(layer)
+
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name in get_layer_tensors(layer):
