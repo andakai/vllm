@@ -1472,5 +1472,12 @@ class AsyncLLM(EngineClient):
         """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
 
+    async def set_num_speculative_tokens(
+        self, num_speculative_tokens: int | None
+    ) -> None:
+        """Draft at most this many tokens per step, 0 to stop drafting; None
+        restores the configured number."""
+        await self.engine_core.set_num_speculative_tokens_async(num_speculative_tokens)
+
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return self.engine_core.get_kv_event_sources()

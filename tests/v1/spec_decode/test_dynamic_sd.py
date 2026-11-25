@@ -188,6 +188,30 @@ def test_scheduler_falls_back_to_static_k_when_dsd_not_configured():
 
 
 @pytest.mark.parametrize(
+    ("schedule", "configured_k"), [(None, 3), ([(1, 2, 3), (3, 16, 1)], 1)]
+)
+def test_scheduler_caps_draft_tokens_at_runtime(schedule, configured_k):
+    def num_spec_tokens(*caps: int | None) -> int:
+        if schedule is None:
+            scheduler = create_scheduler(
+                max_num_seqs=4, max_num_batched_tokens=40, num_speculative_tokens=3
+            )
+        else:
+            scheduler = _make_scheduler_with_dynamic_sd(
+                schedule, max_num_seqs=4, max_num_batched_tokens=40
+            )
+        for cap in caps:
+            scheduler.set_num_speculative_tokens(cap)
+        return _add_requests_and_schedule(scheduler, 4).num_spec_tokens_to_schedule
+
+    assert num_spec_tokens(0) == 0
+    assert num_spec_tokens(2) == min(2, configured_k)
+    assert num_spec_tokens(0, None) == configured_k
+    with pytest.raises(ValueError, match=r"\[0, 3\]"):
+        num_spec_tokens(4)
+
+
+@pytest.mark.parametrize(
     ("model", "keeps_schedule"),
     [
         # Dense DP ranks run as independent engines with no DP collectives.

@@ -990,6 +990,17 @@ impl EngineCoreClient {
         Ok(())
     }
 
+    /// Draft at most this many tokens per step on every connected engine, 0 to
+    /// stop drafting; `None` restores the configured number.
+    pub async fn set_num_speculative_tokens(
+        &self,
+        num_speculative_tokens: Option<u64>,
+    ) -> Result<()> {
+        self.call_utility::<(), _>("set_num_speculative_tokens", (num_speculative_tokens,))
+            .await?;
+        Ok(())
+    }
+
     /// Return the committed weight version agreed on by every connected engine.
     pub async fn get_weight_version(&self) -> Result<String> {
         self.call_utility_consensus("get_weight_version", ()).await

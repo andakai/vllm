@@ -208,6 +208,7 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/finish_weight_update` - Finalizes the weight update
 - `/update_weight_version` - Set the weight version without updating model weights
 - `/weight_info` - Get the latest committed weight version
+- `/set_num_speculative_tokens` - Change the number of draft tokens per step, see [Dynamic Speculative Decoding](../../features/speculative_decoding/dynamic_speculative_decoding.md#changing-k-at-runtime)
 - `/get_world_size` - Get distributed world size
 
 ### Collective RPC

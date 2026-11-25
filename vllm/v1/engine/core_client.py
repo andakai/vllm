@@ -238,6 +238,9 @@ class EngineCoreClient(ABC):
     def set_weight_version(self, weight_version: str) -> None:
         raise NotImplementedError
 
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        raise NotImplementedError
+
     def get_weight_version(self) -> str:
         raise NotImplementedError
 
@@ -245,6 +248,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def set_weight_version_async(self, weight_version: str) -> None:
+        raise NotImplementedError
+
+    async def set_num_speculative_tokens_async(
+        self, num_speculative_tokens: int | None
+    ) -> None:
         raise NotImplementedError
 
     async def get_weight_version_async(self) -> str:
@@ -494,6 +502,9 @@ class InprocClient(EngineCoreClient):
 
     def set_weight_version(self, weight_version: str) -> None:
         self.engine_core.set_weight_version(weight_version)
+
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        self.engine_core.set_num_speculative_tokens(num_speculative_tokens)
 
     def get_weight_version(self) -> str:
         return self.engine_core.get_weight_version()
@@ -1163,6 +1174,9 @@ class SyncMPClient(MPClient):
     def set_weight_version(self, weight_version: str) -> None:
         self.call_utility("set_weight_version", weight_version)
 
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        self.call_utility("set_num_speculative_tokens", num_speculative_tokens)
+
     def get_weight_version(self) -> str:
         return self.call_utility("get_weight_version")
 
@@ -1457,6 +1471,13 @@ class AsyncMPClient(MPClient):
 
     async def set_weight_version_async(self, weight_version: str) -> None:
         await self.call_utility_async("set_weight_version", weight_version)
+
+    async def set_num_speculative_tokens_async(
+        self, num_speculative_tokens: int | None
+    ) -> None:
+        await self.call_utility_async(
+            "set_num_speculative_tokens", num_speculative_tokens
+        )
 
     async def get_weight_version_async(self) -> str:
         return await self.call_utility_consensus_async("get_weight_version")

@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use thiserror_ext::AsReport;
 use vllm_metrics::METRICS;
 
 use crate::error::{ApiError, invalid_request};
@@ -32,6 +33,12 @@ pub(crate) struct FinishWeightUpdateRequest {
 #[derive(Deserialize)]
 pub(crate) struct UpdateWeightVersionRequest {
     new_version: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct NumSpeculativeTokens {
+    #[serde(default)]
+    num_speculative_tokens: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -178,6 +185,22 @@ pub async fn finish_weight_update(
     Ok(Json(MessageResponse {
         message: "Weight update finished",
     }))
+}
+
+/// Draft at most this many tokens per step, 0 to stop drafting; `null`
+/// restores the configured number.
+pub async fn set_num_speculative_tokens(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<NumSpeculativeTokens>, JsonRejection>,
+) -> Result<Json<NumSpeculativeTokens>, ApiError> {
+    let Json(body) = body?;
+    state
+        .engine_core_client()
+        .set_num_speculative_tokens(body.num_speculative_tokens)
+        .await
+        // The call only validates the count against the engine's config.
+        .map_err(|error| invalid_request!("{}", error.as_report()))?;
+    Ok(Json(body))
 }
 
 /// Update the weight version identifier.

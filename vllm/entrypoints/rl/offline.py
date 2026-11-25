@@ -66,3 +66,8 @@ class RLOfflineMixin(OfflineInferenceMixin):
     def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return self.llm_engine.get_weight_version()
+
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        """Draft at most this many tokens per step, 0 to stop drafting; None
+        restores the configured number."""
+        self.llm_engine.set_num_speculative_tokens(num_speculative_tokens)

@@ -337,6 +337,7 @@ class Scheduler(SchedulerInterface):
         # lookahead slots.
         self.can_skip_drafts = self.num_lookahead_tokens > 0
         self.dynamic_sd_lookup: list[int] | None = None
+        self.configured_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
@@ -344,6 +345,7 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
+                self.configured_sd_lookup = self.dynamic_sd_lookup
             self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if (
@@ -3340,6 +3342,26 @@ class Scheduler(SchedulerInterface):
                 and self.ec_connector.has_pending_push_work()
             )
         )
+
+    def set_num_speculative_tokens(self, num_speculative_tokens: int | None) -> None:
+        """Draft at most `num_speculative_tokens` tokens per step from the next
+        step on, 0 to stop drafting; None restores the configured count."""
+        if num_speculative_tokens is None:
+            self.dynamic_sd_lookup = self.configured_sd_lookup
+            return
+        if self.num_sampled_tokens_per_step == 0:
+            raise ValueError("Diffusion models draft a fixed number of tokens.")
+        if not 0 <= num_speculative_tokens <= self.num_spec_tokens:
+            raise ValueError(
+                f"num_speculative_tokens must be in [0, {self.num_spec_tokens}], "
+                f"got {num_speculative_tokens}."
+            )
+        # The dynamic schedule path already lets each step draft fewer tokens
+        # than the configured count; a cap is a schedule with smaller entries.
+        lookup = self.configured_sd_lookup or [self.num_spec_tokens] * (
+            self.scheduler_config.max_num_seqs + 1
+        )
+        self.dynamic_sd_lookup = [min(k, num_speculative_tokens) for k in lookup]
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

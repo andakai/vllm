@@ -221,6 +221,7 @@ def test_openapi_stateless(case: schemathesis.Case):
         "/update_weights",
         "/finish_weight_update",
         "/update_weight_version",
+        "/set_num_speculative_tokens",
     ):
         return
 

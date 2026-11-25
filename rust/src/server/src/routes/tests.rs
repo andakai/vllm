@@ -11741,6 +11741,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/update_weights"),
         ("POST", "/finish_weight_update"),
         ("POST", "/update_weight_version"),
+        ("POST", "/set_num_speculative_tokens"),
         ("GET", "/weight_info"),
     ] {
         let response = app
@@ -11767,7 +11768,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let mut calls = Vec::new();
-            for _ in 0..11 {
+            for _ in 0..13 {
                 let utility = recv_engine_message(dealer).await;
                 assert_eq!(utility[0].as_ref(), &[0x03]);
                 let payload = decode_value(&utility[1]).expect("decode utility");
@@ -11797,6 +11798,8 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
                     "collective_rpc [\"finish_weight_update\",null,[],{}]",
                     "set_weight_version [\"step-2\"]",
                     "get_weight_version []",
+                    "set_num_speculative_tokens [0]",
+                    "set_num_speculative_tokens [null]",
                     "collective_rpc [\"shutdown_weight_transfer_engine\",null,[],{}]",
                 ]
             "#]].assert_debug_eq(&calls);
@@ -11846,6 +11849,16 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             Some(json!({"new_version": "step-2"})),
         ),
         ("GET", "/weight_info", None),
+        (
+            "POST",
+            "/set_num_speculative_tokens",
+            Some(json!({"num_speculative_tokens": 0})),
+        ),
+        (
+            "POST",
+            "/set_num_speculative_tokens",
+            Some(json!({"num_speculative_tokens": null})),
+        ),
         ("POST", "/shutdown_weight_transfer_engine", None),
     ] {
         let mut request = Request::builder().method(method).uri(path);
@@ -11898,6 +11911,8 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             "{\"message\":\"Weight update finished\"}",
             "{\"success\":true,\"new_version\":\"step-2\"}",
             "{\"weight_version\":\"step-2\"}",
+            "{\"num_speculative_tokens\":0}",
+            "{\"num_speculative_tokens\":null}",
             "{\"message\":\"Weight transfer shut down\"}",
         ]
     "#]]
@@ -11930,6 +11945,7 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
         ("/finish_weight_update", r#"{"weight_version":1}"#),
         ("/update_weight_version", "{}"),
         ("/update_weight_version", r#"{"new_version":null}"#),
+        ("/set_num_speculative_tokens", r#"{"num_speculative_tokens":-1}"#),
     ] {
         let response = app
             .call(
